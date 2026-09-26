@@ -1,0 +1,32 @@
+# Runtime state: credentials, encrypted configuration, Telegram session,
+# cache, backups and generated STRM files never belong in source control.
+/data/
+/old/
+/.audit/
+/artifacts/
+/design-qa.md
+/docs/references/
+
+# Generated artifacts.
+/bin/
+/web/node_modules/
+/web/dist/
+/internal/webui/dist/*
+!/internal/webui/dist/.keep
+*.tsbuildinfo
+*.log
+
+# Local configuration and certificate material.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.session*
+*.db
+*.sqlite
+*.sqlite3
+
+.DS_Store

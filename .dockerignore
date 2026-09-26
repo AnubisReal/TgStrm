@@ -1,0 +1,23 @@
+# Never send runtime state or local history to the Docker build context.
+.git
+.github
+data
+old
+.audit
+artifacts
+bin
+web/node_modules
+web/dist
+internal/webui/dist
+.env
+.env.*
+*.log
+*.db
+*.sqlite
+*.sqlite3
+*.session*
+*.pem
+*.key
+*.p12
+*.pfx
+.DS_Store

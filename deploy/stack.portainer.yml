@@ -1,0 +1,37 @@
+# Stack recomendado para Portainer cuando Nginx Proxy Manager también se
+# ejecuta en Docker. Antes de desplegarlo, sustituye los valores de ejemplo
+# del bloque de variables del Stack por rutas y red reales de tu servidor.
+services:
+  tgstrm:
+    image: ${TGSTRM_IMAGE:-ghcr.io/anubisreal/tgstrm:v0.1.2}
+    container_name: tgstrm
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      TGSTRM_ADDR: :5151
+      TGSTRM_ALLOW_REMOTE: "1"
+      TGSTRM_DATA_DIR: /data
+      # CIDR real de la red Docker de Nginx Proxy Manager. No uses una red
+      # abierta: la aplicación solo acepta X-Forwarded-Proto desde este origen.
+      TGSTRM_TRUSTED_PROXY_CIDRS: ${TGSTRM_TRUSTED_PROXY_CIDRS:-}
+    volumes:
+      # Estado persistente: configuración cifrada, sesión Telegram, caché y copias.
+      - ${TGSTRM_DATA_DIR_HOST:-/instalaciones/tgstrm/data}:/data
+      # Biblioteca STRM. En la interfaz se configuran estas rutas del contenedor.
+      - ${TGSTRM_MOVIES_DIR_HOST:-/extraible2/strm/movies}:/media/movies
+      - ${TGSTRM_SHOWS_DIR_HOST:-/extraible2/strm/series}:/media/shows
+    networks: [npm]
+    healthcheck:
+      test: ["CMD", "/tgstrm", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  npm:
+    external: true
+    # Red existente a la que ya pertenece el contenedor de Nginx Proxy Manager.
+    name: ${TGSTRM_NPM_NETWORK:-npm_default}
