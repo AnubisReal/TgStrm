@@ -5,13 +5,14 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 jobs:
   native:
     name: Native ${{ matrix.goos }}-${{ matrix.goarch }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -78,6 +79,9 @@ jobs:
   container:
     name: Container image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-qemu-action@v3
@@ -105,6 +109,9 @@ jobs:
     name: Publish release assets
     needs: [native, container]
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
     steps:
       - uses: actions/download-artifact@v7
         with:

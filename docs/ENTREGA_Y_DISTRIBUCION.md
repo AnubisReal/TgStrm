@@ -52,8 +52,18 @@ quedan registradas en la sección final.
 - [x] Cada release genera `SHA256SUMS` para verificar los archivos descargados.
 - [x] Workflow de tag `v*`: imagen multi-arquitectura Linux amd64/arm64 en
   GitHub Container Registry.
+- [x] La imagen declara `org.opencontainers.image.source` apuntando al
+  repositorio, para asociar el paquete GHCR con su código fuente.
+- [ ] Confirmar en `ghcr.io/anubisreal/tgstrm` que el paquete está vinculado al
+  repositorio actual `AnubisReal/TgStrm` y que este tiene `Write` en
+  **Package settings → Manage Actions access**. Tras recrear el repositorio,
+  GHCR puede conservar permisos granulares del repositorio anterior; el token
+  del workflow ya tiene `packages: write`, pero eso no sustituye esta ACL.
 - [x] Tag `v0.1.1` publicado: cinco binarios, `SHA256SUMS` e imagen
   multi-arquitectura generados correctamente en GitHub.
+- [ ] Completar y verificar la Release `v0.1.3`; el build de los cinco
+  ejecutables pasó, pero GHCR rechazó el push con
+  `permission_denied: read_package`, por lo que el job de publicación se omitió.
 - [ ] Descargar y ejecutar el artefacto adecuado en cada plataforma de uso.
 
 ## Documentación operativa
@@ -69,6 +79,7 @@ quedan registradas en la sección final.
 | --- | --- | --- | --- |
 | 2026-09-21 | macOS | Correcto | Binario embebido sin Vite, rutas SPA y `healthcheck` verificados localmente |
 | 2026-09-21 | GitHub Actions | Correcto | CI y release `v0.1.1`: cinco binarios, SHA-256 e imagen Linux amd64/arm64 |
+| 2026-09-26 | GitHub Actions | Parcial | CI `18a5f19` correcto; los cinco binarios `v0.1.3` se compilaron, pero la ACL del paquete GHCR impidió publicar la imagen y bloqueó la Release |
 | Pendiente | Docker/Portainer | — | Docker no está disponible en el entorno actual; faltan volúmenes, permisos y actualización reales |
 | Pendiente | NPM/HTTPS | — | WebSocket, cookies y streaming |
 | Pendiente | Linux/Windows | — | Artefactos de release |
