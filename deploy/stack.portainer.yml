@@ -3,7 +3,7 @@
 # del bloque de variables del Stack por rutas y red reales de tu servidor.
 services:
   tgstrm:
-    image: ${TGSTRM_IMAGE:-ghcr.io/anubisreal/tgstrm:v0.1.2}
+    image: ${TGSTRM_IMAGE:-ghcr.io/anubisreal/tgstrm:v0.1.3}
     container_name: tgstrm
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
