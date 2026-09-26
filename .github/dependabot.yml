@@ -8,6 +8,11 @@ updates:
     directory: /web
     schedule:
       interval: weekly
+    groups:
+      vite-toolchain:
+        patterns:
+          - "vite"
+          - "@vitejs/plugin-react"
   - package-ecosystem: docker
     directory: /
     schedule:
