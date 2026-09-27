@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to rebuild and publish
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -34,6 +40,8 @@ jobs:
             archive: zip
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: actions/setup-go@v7
         with:
           go-version: "1.26.x"
@@ -50,7 +58,7 @@ jobs:
           npm run build
       - name: Bundle executable
         env:
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ github.event.inputs.tag || github.ref_name }}
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           ARCHIVE: ${{ matrix.archive }}
@@ -77,37 +85,75 @@ jobs:
           if-no-files-found: error
 
   container:
-    name: Container image
-    runs-on: ubuntu-latest
+    name: Container ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-qemu-action@v3
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: docker/setup-buildx-action@v3
       - name: Sign in to GitHub Container Registry
         run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-      - name: Build and publish multi-platform image
+      - name: Build and publish native architecture image
         env:
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ github.event.inputs.tag || github.ref_name }}
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
           REPOSITORY: ${{ github.repository }}
         run: |
           set -eu
           VERSION="${VERSION#v}"
           IMAGE="ghcr.io/${REPOSITORY,,}"
           docker buildx build \
-            --platform linux/amd64,linux/arm64 \
+            --platform "${PLATFORM}" \
             --build-arg "VERSION=${VERSION}" \
             --label "org.opencontainers.image.source=https://github.com/${REPOSITORY}" \
             --label "org.opencontainers.image.version=${VERSION}" \
+            --tag "${IMAGE}:${VERSION}-${ARCH}" \
+            --cache-from "type=gha,scope=tgstrm-${ARCH}" \
+            --cache-to "type=gha,scope=tgstrm-${ARCH},mode=max" \
+            --push .
+
+  container-manifest:
+    name: Publish multi-architecture image tags
+    needs: [container]
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - name: Sign in to GitHub Container Registry
+        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Assemble and publish manifest
+        env:
+          VERSION: ${{ github.event.inputs.tag || github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -eu
+          VERSION="${VERSION#v}"
+          IMAGE="ghcr.io/${REPOSITORY,,}"
+          docker buildx imagetools create \
             --tag "${IMAGE}:${VERSION}" \
             --tag "${IMAGE}:latest" \
-            --push .
+            "${IMAGE}:${VERSION}-amd64" \
+            "${IMAGE}:${VERSION}-arm64"
 
   publish-release:
     name: Publish release assets
-    needs: [native, container]
+    needs: [native, container-manifest]
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -124,7 +170,7 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
           REPOSITORY: ${{ github.repository }}
         run: |
           gh release create "$TAG" release/* --repo "$REPOSITORY" \
