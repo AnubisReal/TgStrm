@@ -62,10 +62,9 @@ quedan registradas en la sección final.
   evita compilar PostgreSQL y el resto de paquetes ARM bajo emulación QEMU.
 - [x] Tag `v0.1.1` publicado: cinco binarios, `SHA256SUMS` e imagen
   multi-arquitectura generados correctamente en GitHub.
-- [ ] Completar y verificar la Release `v0.1.3`; los cinco ejecutables pasan y
-  GHCR ya acepta el login, pero el runner perdió comunicación durante el build
-  emulado multi-arquitectura. El nuevo flujo usa runners nativos; falta verificar
-  la ejecución completa antes de marcar la Release como publicada.
+- [x] Release `v0.1.3` verificada tras repetir el flujo: cinco ejecutables,
+  `SHA256SUMS` e imagen multi-arquitectura publicados. La repetición usa el tag
+  existente y no lo mueve.
 - [ ] Descargar y ejecutar el artefacto adecuado en cada plataforma de uso.
 
 ## Documentación operativa
@@ -82,6 +81,7 @@ quedan registradas en la sección final.
 | 2026-09-21 | macOS | Correcto | Binario embebido sin Vite, rutas SPA y `healthcheck` verificados localmente |
 | 2026-09-21 | GitHub Actions | Correcto | CI y release `v0.1.1`: cinco binarios, SHA-256 e imagen Linux amd64/arm64 |
 | 2026-09-26 | GitHub Actions | Parcial | CI correcto y cinco binarios `v0.1.3` compilados; el primer intento tuvo una ACL de GHCR y el reintento perdió comunicación con el runner durante el build emulado |
+| 2026-09-27 | GitHub Actions | Correcto | Release `v0.1.3` repetida con imágenes arm64/amd64 en runners nativos; manifest multi-arquitectura, cinco binarios y `SHA256SUMS` publicados |
 | Pendiente | Docker/Portainer | — | Docker no está disponible en el entorno actual; faltan volúmenes, permisos y actualización reales |
 | Pendiente | NPM/HTTPS | — | WebSocket, cookies y streaming |
 | Pendiente | Linux/Windows | — | Artefactos de release |
