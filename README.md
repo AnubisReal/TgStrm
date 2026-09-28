@@ -40,7 +40,7 @@ Mientras el repositorio continúe privado, configura también el registro `ghcr.
 Después añade estas variables con las rutas reales del servidor:
 
 ```text
-TGSTRM_IMAGE=ghcr.io/anubisreal/tgstrm:v0.1.4
+TGSTRM_IMAGE=ghcr.io/anubisreal/tgstrm:v0.1.5
 TGSTRM_DATA_DIR_HOST=/instalaciones/tgstrm/data
 TGSTRM_MOVIES_DIR_HOST=/extraible2/strm/movies
 TGSTRM_SHOWS_DIR_HOST=/extraible2/strm/series

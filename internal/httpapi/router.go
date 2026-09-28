@@ -526,6 +526,7 @@ func (a *API) topicMessages(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "messages_failed", "No se pudieron cargar los mensajes.")
 		return
 	}
+	enrichTopicEpisodeNumbers(messages)
 	remotePage := telegramauth.TopicRemotePage{}
 	allowRemoteRefresh := r.URL.Query().Get("refresh") != "0"
 	// The newest page is refreshed once. Older pages are served from PostgreSQL
@@ -543,6 +544,7 @@ func (a *API) topicMessages(w http.ResponseWriter, r *http.Request) {
 				fail(w, 500, "messages_failed", "No se pudieron cargar los mensajes.")
 				return
 			}
+			enrichTopicEpisodeNumbers(messages)
 		}
 	}
 	nextCursor := 0
@@ -553,6 +555,22 @@ func (a *API) topicMessages(w http.ResponseWriter, r *http.Request) {
 		nextCursor = messages[len(messages)-1].TelegramID
 	}
 	writeJSON(w, 200, map[string]any{"topic": topic, "messages": messages, "has_more": hasMore, "next_cursor": nextCursor, "sync": syncState})
+}
+
+// Episode identity is useful to the catalog before a STRM exists. Prefer the
+// saved manual resolution or written-path identity supplied by the service;
+// otherwise infer S/E from the Telegram filename or caption so cards and gap
+// placeholders can be interleaved in their real season/episode order.
+func enrichTopicEpisodeNumbers(messages []telegramauth.TopicMessage) {
+	for i := range messages {
+		if messages[i].EpisodeNumber > 0 {
+			continue
+		}
+		if episode, ok := detectEpisode(messages[i].FileName, messages[i].Body); ok {
+			messages[i].SeasonNumber = episode.Season
+			messages[i].EpisodeNumber = episode.Episode
+		}
+	}
 }
 
 func (a *API) telegramService() *telegramauth.Service {

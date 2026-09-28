@@ -19,9 +19,11 @@ type missingEpisode struct {
 	StillPath string `json:"still_path,omitempty"`
 }
 
-// topicEpisodeGaps compares TMDB's aired episode catalogue with STRM exports
-// that are currently written. The expected catalogue is cached in PostgreSQL;
-// realtime refreshes therefore require no TMDB request.
+// topicEpisodeGaps compares TMDB's aired episode catalogue with episode videos
+// present in Telegram. STRM generation is a separate library-export concern:
+// a video must stop appearing as missing as soon as its episode identity is
+// known, even when its STRM has not been written yet. The expected catalogue
+// is cached in PostgreSQL; realtime refreshes therefore need no TMDB request.
 func (a *API) topicEpisodeGaps(w http.ResponseWriter, r *http.Request) {
 	var seriesID int64
 	err := a.db.QueryRowContext(r.Context(), `SELECT tm.tmdb_id FROM tgstrm.topics t
@@ -51,10 +53,9 @@ func (a *API) topicEpisodeGaps(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.QueryContext(r.Context(), `SELECT COALESCE(mm.file_name,''),COALESCE(m.body,''),
 		COALESCE(eo.season_number,0),COALESCE(eo.episode_number,0)
 		FROM tgstrm.messages m JOIN tgstrm.message_media mm ON mm.message_id=m.id
-		JOIN tgstrm.stream_assets sa ON sa.message_id=m.id
-		JOIN tgstrm.stream_exports e ON e.asset_id=sa.id AND e.status='written'
-		LEFT JOIN tgstrm.stream_episode_overrides eo ON eo.asset_id=sa.id
-		WHERE m.topic_id=$1 AND m.is_active AND m.media_type='video'`, r.PathValue("topicID"))
+		LEFT JOIN tgstrm.stream_assets sa ON sa.message_id=m.id
+		LEFT JOIN tgstrm.stream_episode_overrides eo ON eo.asset_id=sa.id AND eo.series_tmdb_id=$2
+		WHERE m.topic_id=$1 AND m.is_active AND m.media_type='video'`, r.PathValue("topicID"), seriesID)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "episode_gaps_failed", "No se pudo comprobar la biblioteca.")
 		return
