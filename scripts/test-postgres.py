@@ -37,6 +37,7 @@ try:
     app_env = init_env.copy()
     app_env["PGPASSWORD"] = app_password
     subprocess.run(["psql", "-h", "127.0.0.1", "-p", str(port), "-U", "tgstrm", "-d", init_db, "-v", "ON_ERROR_STOP=1", "-c", "SELECT 1"], env=app_env, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["go", "test", "-count=1", "./..."], env=env, check=True)
     subprocess.run(["go", "test", "-race", "-count=1", "./..."], env=env, check=True)
 finally:
     if started:

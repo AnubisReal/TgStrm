@@ -135,7 +135,7 @@ func TestPostgresBootstrapRestartAndMigrationIntegrity(t *testing.T) {
 		t.Skip("isolated PostgreSQL fixture required")
 	}
 	port, _ := strconv.Atoi(os.Getenv("TGSTRM_TEST_PG_PORT"))
-	cfg := config.Database{Host: "127.0.0.1", Port: uint16(port), Name: "tgstrm_bootstrap_test", User: "tgstrm_test", Password: password, SSLMode: "disable"}
+	cfg := config.Database{Host: "127.0.0.1", Port: uint16(port), Name: fmt.Sprintf("tgstrm_bootstrap_test_%d", os.Getpid()), User: "tgstrm_test", Password: password, SSLMode: "disable"}
 	store, err := config.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
