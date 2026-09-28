@@ -47,7 +47,7 @@ func main() {
 		log.Fatal("No se puede preparar la estructura persistente: ", err)
 	}
 	trustedProxyCIDRs := strings.Split(os.Getenv("TGSTRM_TRUSTED_PROXY_CIDRS"), ",")
-	api, err := httpapi.NewWithOptions(store, httpapi.Options{TrustedProxyCIDRs: trustedProxyCIDRs})
+	api, err := httpapi.NewWithOptions(store, httpapi.Options{TrustedProxyCIDRs: trustedProxyCIDRs, DatabaseSetupMode: os.Getenv("TGSTRM_DATABASE_SETUP_MODE")})
 	if err != nil {
 		log.Fatal("Configuración persistente inválida; no se reiniciará la instalación: ", err)
 	}

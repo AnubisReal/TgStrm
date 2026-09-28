@@ -67,12 +67,12 @@ func verifyPassword(encoded, password string) bool {
 	return subtle.ConstantTimeCompare(actual, expected) == 1
 }
 
-func (a *API) ensureDefaultAdmin(ctx context.Context) error {
-	if a.db == nil {
+func (a *API) ensureDefaultAdmin(ctx context.Context, db *sql.DB) error {
+	if db == nil {
 		return errors.New("database unavailable")
 	}
 	var count int
-	if err := a.db.QueryRowContext(ctx, `SELECT count(*) FROM tgstrm.admin_users`).Scan(&count); err != nil {
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM tgstrm.admin_users`).Scan(&count); err != nil {
 		return err
 	}
 	if count > 0 {
@@ -82,7 +82,7 @@ func (a *API) ensureDefaultAdmin(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_, err = a.db.ExecContext(ctx, `INSERT INTO tgstrm.admin_users(id,username,password_hash,must_change_password) VALUES($1,'admin',$2,true) ON CONFLICT DO NOTHING`, uuid.New(), hash)
+	_, err = db.ExecContext(ctx, `INSERT INTO tgstrm.admin_users(id,username,password_hash,must_change_password) VALUES($1,'admin',$2,true) ON CONFLICT DO NOTHING`, uuid.New(), hash)
 	if err == nil {
 		log.Printf("Cuenta administradora inicial preparada. Usuario: admin (se exigirá cambiar la contraseña inicial)")
 	}
@@ -554,7 +554,7 @@ func (a *API) adminGate(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		public := p == "/api/v1/health/live" || p == "/api/v1/setup/status" || p == "/api/v1/setup/database/test" || p == "/api/v1/setup/database" || p == "/api/v1/admin/login" || p == "/api/v1/admin/session" || p == "/api/v1/admin/recovery/request" || p == "/api/v1/admin/recovery/complete" || strings.HasPrefix(p, "/stream/")
+		public := p == "/api/v1/health/live" || p == "/api/v1/setup/status" || p == "/api/v1/setup/database/test" || p == "/api/v1/setup/database/probe-local" || p == "/api/v1/setup/database" || p == "/api/v1/admin/login" || p == "/api/v1/admin/session" || p == "/api/v1/admin/recovery/request" || p == "/api/v1/admin/recovery/complete" || strings.HasPrefix(p, "/stream/")
 		if public {
 			next.ServeHTTP(w, r)
 			return

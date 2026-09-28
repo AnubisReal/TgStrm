@@ -11,6 +11,20 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: tgstrm_test
+          POSTGRES_PASSWORD: tgstrm-ci-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tgstrm_test -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 8
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -23,6 +37,9 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Verify Go
+        env:
+          TGSTRM_TEST_PG_PASSWORD: tgstrm-ci-test-password
+          TGSTRM_TEST_PG_PORT: "5432"
         run: |
           go mod download
           go vet ./...

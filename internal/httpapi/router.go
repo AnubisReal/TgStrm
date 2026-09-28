@@ -28,27 +28,28 @@ import (
 )
 
 type API struct {
-	mu               sync.Mutex
-	store            *config.Store
-	db               *sql.DB
-	configured       bool
-	recovery         bool
-	telegram         *telegramauth.Service
-	client           *http.Client
-	tmdbRateMu       sync.Mutex
-	tmdbNextRequest  time.Time
-	tmdbBlockedUntil time.Time
-	tmdbScanMu       sync.Mutex
-	tmdbScans        map[string]bool
-	groupScanMu      sync.Mutex
-	groupScans       map[string]bool
-	exportLocks      sync.Map
-	backupMu         sync.Mutex
-	restoreMu        sync.Mutex
-	maintenance      bool
-	backgroundCancel context.CancelFunc
-	backgroundWG     sync.WaitGroup
-	trustedProxies   []*net.IPNet
+	mu                sync.Mutex
+	store             *config.Store
+	db                *sql.DB
+	configured        bool
+	recovery          bool
+	telegram          *telegramauth.Service
+	databaseSetupMode string
+	client            *http.Client
+	tmdbRateMu        sync.Mutex
+	tmdbNextRequest   time.Time
+	tmdbBlockedUntil  time.Time
+	tmdbScanMu        sync.Mutex
+	tmdbScans         map[string]bool
+	groupScanMu       sync.Mutex
+	groupScans        map[string]bool
+	exportLocks       sync.Map
+	backupMu          sync.Mutex
+	restoreMu         sync.Mutex
+	maintenance       bool
+	backgroundCancel  context.CancelFunc
+	backgroundWG      sync.WaitGroup
+	trustedProxies    []*net.IPNet
 }
 
 // Options contains the narrow deployment settings that must be known before
@@ -56,6 +57,7 @@ type API struct {
 // configuration managed by the panel.
 type Options struct {
 	TrustedProxyCIDRs []string
+	DatabaseSetupMode string
 }
 
 // A bounded 206 response prevents an abandoned seek from monopolizing the
@@ -75,6 +77,11 @@ func NewWithOptions(store *config.Store, options Options) (*API, error) {
 		return nil, err
 	}
 	a := &API{store: store, client: &http.Client{Timeout: 12 * time.Second}, trustedProxies: trustedProxies}
+	if options.DatabaseSetupMode == "container" || options.DatabaseSetupMode == "external" {
+		a.databaseSetupMode = options.DatabaseSetupMode
+	} else {
+		a.databaseSetupMode = "native"
+	}
 	cfg, err := store.LoadDatabase()
 	if err != nil {
 		return nil, err
@@ -94,7 +101,7 @@ func NewWithOptions(store *config.Store, options Options) (*API, error) {
 			a.recovery = true
 		} else {
 			a.db = db
-			if err = a.ensureDefaultAdmin(ctx); err != nil {
+			if err = a.ensureDefaultAdmin(ctx, db); err != nil {
 				db.Close()
 				return nil, fmt.Errorf("prepare administrator: %w", err)
 			}
@@ -175,9 +182,10 @@ func (a *API) Handler() http.Handler {
 				}
 			}
 		}
-		writeJSON(w, 200, map[string]string{"database": state, "telegram": telegramState})
+		writeJSON(w, 200, map[string]string{"database": state, "telegram": telegramState, "database_setup_mode": a.databaseSetupMode})
 	})
 	mux.HandleFunc("POST /api/v1/setup/database/test", a.protect(a.testDatabase))
+	mux.HandleFunc("POST /api/v1/setup/database/probe-local", a.protect(a.probeLocalDatabase))
 	mux.HandleFunc("POST /api/v1/setup/database", a.protect(a.saveDatabase))
 	mux.HandleFunc("GET /api/v1/admin/session", a.sameOrigin(a.adminSessionStatus))
 	mux.HandleFunc("POST /api/v1/admin/login", a.sameOrigin(a.adminLogin))
@@ -785,24 +793,30 @@ func (a *API) protect(next http.HandlerFunc) http.HandlerFunc {
 		next(w, r)
 	}
 }
-func decodeDatabase(w http.ResponseWriter, r *http.Request) (config.Database, bool) {
-	var cfg config.Database
+
+type databaseSetupRequest struct {
+	config.Database
+	CreateDatabase bool `json:"create_database"`
+}
+
+func decodeDatabase(w http.ResponseWriter, r *http.Request) (config.Database, bool, bool) {
+	var input databaseSetupRequest
 	r.Body = http.MaxBytesReader(w, r.Body, 8192)
 	d := json.NewDecoder(r.Body)
 	d.DisallowUnknownFields()
-	if err := d.Decode(&cfg); err != nil {
+	if err := d.Decode(&input); err != nil {
 		fail(w, 400, "invalid_request", "Revisa los datos de conexión.")
-		return cfg, false
+		return config.Database{}, false, false
 	}
 	if d.Decode(&struct{}{}) != io.EOF {
 		fail(w, 400, "invalid_request", "Solicitud no válida.")
-		return cfg, false
+		return config.Database{}, false, false
 	}
-	if err := postgres.Validate(cfg); err != nil {
+	if err := postgres.Validate(input.Database); err != nil {
 		fail(w, 400, "invalid_configuration", err.Error())
-		return cfg, false
+		return config.Database{}, false, false
 	}
-	return cfg, true
+	return input.Database, input.CreateDatabase, true
 }
 func (a *API) testDatabase(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
@@ -811,19 +825,21 @@ func (a *API) testDatabase(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, "already_configured", "La conexión ya está configurada. Su edición requerirá el panel autenticado.")
 		return
 	}
-	cfg, ok := decodeDatabase(w, r)
+	cfg, createDatabase, ok := decodeDatabase(w, r)
 	if !ok {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
-	db, err := postgres.Connect(ctx, cfg)
-	if err != nil {
-		fail(w, 422, "database_unreachable", "No se pudo conectar. Revisa servidor, credenciales y TLS.")
+	if err := postgres.CheckSetup(ctx, cfg, createDatabase); err != nil {
+		fail(w, 422, "database_unreachable", publicDatabaseSetupError(err))
 		return
 	}
-	defer db.Close()
-	writeJSON(w, 200, map[string]string{"status": "connected", "message": "Conexión correcta. La estructura se preparará al guardar."})
+	message := "Conexión correcta. La estructura se preparará al guardar."
+	if createDatabase {
+		message = "Conexión correcta. Al guardar se creará la base si todavía no existe y luego su esquema TgStrm."
+	}
+	writeJSON(w, 200, map[string]string{"status": "connected", "message": message})
 }
 func (a *API) saveDatabase(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
@@ -832,15 +848,15 @@ func (a *API) saveDatabase(w http.ResponseWriter, r *http.Request) {
 		fail(w, 409, "already_configured", "Esta instalación ya tiene una base de datos. No se puede sustituir desde el asistente.")
 		return
 	}
-	cfg, ok := decodeDatabase(w, r)
+	cfg, createDatabase, ok := decodeDatabase(w, r)
 	if !ok {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	db, err := postgres.Connect(ctx, cfg)
+	db, err := postgres.OpenForSetup(ctx, cfg, createDatabase)
 	if err != nil {
-		fail(w, 422, "database_unreachable", "No se pudo conectar. La configuración anterior se conserva.")
+		fail(w, 422, "database_unreachable", publicDatabaseSetupError(err))
 		return
 	}
 	if err = postgres.Migrate(ctx, db); err != nil {
@@ -848,7 +864,7 @@ func (a *API) saveDatabase(w http.ResponseWriter, r *http.Request) {
 		fail(w, 422, "migration_failed", "No se pudo preparar el esquema. Comprueba permisos y compatibilidad; no se ha guardado la conexión.")
 		return
 	}
-	if err = a.ensureDefaultAdmin(ctx); err != nil {
+	if err = a.ensureDefaultAdmin(ctx, db); err != nil {
 		db.Close()
 		fail(w, 500, "admin_setup_failed", "No se pudo preparar la cuenta administradora.")
 		return
@@ -864,4 +880,34 @@ func (a *API) saveDatabase(w http.ResponseWriter, r *http.Request) {
 	a.configured = true
 	a.recovery = false
 	writeJSON(w, 201, map[string]string{"status": "ready"})
+}
+
+func publicDatabaseSetupError(err error) string {
+	if strings.Contains(err.Error(), "CREATEDB") {
+		return err.Error()
+	}
+	return "No se pudo conectar con PostgreSQL. Comprueba que el servicio esté iniciado, el servidor, el puerto, usuario, contraseña y TLS."
+}
+
+func (a *API) probeLocalDatabase(w http.ResponseWriter, r *http.Request) {
+	a.mu.Lock()
+	configured := a.configured
+	a.mu.Unlock()
+	if configured {
+		fail(w, http.StatusConflict, "already_configured", "La conexión ya está configurada.")
+		return
+	}
+	if a.databaseSetupMode != "native" {
+		fail(w, http.StatusConflict, "container_runtime", "Esta instalación se ejecuta en un contenedor. Usa el servicio PostgreSQL de la misma red de Docker.")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	conn, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", "5432"))
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "not_found", "message": "No hay un servicio escuchando en 127.0.0.1:5432. Instala PostgreSQL con el instalador oficial de tu sistema y vuelve a comprobar."})
+		return
+	}
+	_ = conn.Close()
+	writeJSON(w, http.StatusOK, map[string]string{"status": "available", "message": "Hay un servicio escuchando en 127.0.0.1:5432. Comprueba usuario y contraseña con Probar conexión."})
 }

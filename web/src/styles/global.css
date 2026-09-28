@@ -327,6 +327,40 @@ fieldset:disabled {
   font: inherit;
   font-size: 13px;
 }
+.database-card .settings-select-control {
+  position: relative; display: block; width: 100%; height: 50px;
+  border: 1px solid #e0e0e0; border-radius: 999px; background: #fff;
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+.database-card .settings-select-control select {
+  width: 100%; height: 100%; padding: 0 54px 0 16px; border: 0;
+  border-radius: inherit; appearance: none; -webkit-appearance: none;
+  background: transparent; color: #333; font: inherit; font-size: 13px; cursor: pointer;
+}
+.database-card .settings-select-control > i {
+  position: absolute; top: 50%; right: 7px; width: 34px; height: 34px;
+  display: grid; place-items: center; border-radius: 999px; background: #292925;
+  color: #fff; pointer-events: none; transform: translateY(-50%);
+}
+.database-card .settings-select-control:focus-within { border-color: #777771; box-shadow: 0 0 0 3px rgb(41 41 37 / 7%); }
+.database-local-check {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
+  gap: 10px 14px; margin: 0 0 20px; padding: 15px; border: 1px solid #e7e7e2;
+  border-radius: 16px; background: #f8f8f6; color: #333;
+}
+.database-local-check strong { font-size: 12px; font-weight: 600; }
+.database-local-check p { margin: 4px 0 0; color: #777; font-size: 11px; line-height: 1.45; }
+.database-local-check .secondary-button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; white-space: nowrap; }
+.database-local-check .database-downloads { grid-column: 1 / -1; margin-top: 0; }
+.database-local-check a { color: #444; text-underline-offset: 3px; }
+.database-create-option {
+  display: flex; align-items: flex-start; gap: 11px; margin: 0 0 18px; padding: 12px 14px;
+  border: 1px solid #e7e7e2; border-radius: 14px; background: #fbfbfa; cursor: pointer;
+}
+.database-create-option input { width: 16px; height: 16px; margin: 2px 0 0; accent-color: #292925; flex: 0 0 auto; }
+.database-create-option span { display: grid; gap: 4px; }
+.database-create-option strong { color: #41413d; font-size: 12px; font-weight: 600; }
+.database-create-option small { color: #81817b; font-size: 10px; line-height: 1.45; }
 .database-actions {
   display: flex;
   gap: 12px;

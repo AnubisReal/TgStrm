@@ -40,7 +40,7 @@ Mientras el repositorio continúe privado, configura también el registro `ghcr.
 Después añade estas variables con las rutas reales del servidor:
 
 ```text
-TGSTRM_IMAGE=ghcr.io/anubisreal/tgstrm:v0.1.3
+TGSTRM_IMAGE=ghcr.io/anubisreal/tgstrm:v0.1.4
 TGSTRM_DATA_DIR_HOST=/instalaciones/tgstrm/data
 TGSTRM_MOVIES_DIR_HOST=/extraible2/strm/movies
 TGSTRM_SHOWS_DIR_HOST=/extraible2/strm/series
@@ -54,7 +54,7 @@ PGID=1000
 
 > Los tres directorios del host deben existir y pertenecer a `PUID:PGID`. `/data` es el estado de TgStrm; películas y series son bibliotecas independientes. No elimines `/data` al actualizar.
 
-La plantilla de variables completa está en [deploy/portainer.env.example](deploy/portainer.env.example). También se conservan las dos variantes técnicas en [deploy/compose.portainer.yml](deploy/compose.portainer.yml) y [deploy/compose.portainer.npm.yml](deploy/compose.portainer.npm.yml).
+La plantilla de variables está en [deploy/portainer.env.example](deploy/portainer.env.example). Para una instalación nueva con PostgreSQL persistente usa [Portainer con NPM en el host](deploy/compose.portainer.postgres.yml) o [Portainer con NPM en Docker](deploy/compose.portainer.postgres.npm.yml). Las plantillas sin base integrada siguen disponibles para instalaciones que ya usan PostgreSQL externo.
 
 ## Releases nativas
 

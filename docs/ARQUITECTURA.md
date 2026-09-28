@@ -297,7 +297,7 @@ Desde ahora evitar dependencias de shell Unix en la aplicación, rutas absolutas
 
 ## 17. Configuración PostgreSQL desde la web
 
-Ruta inicial: `/setup/database`. Campos: host, puerto, nombre, usuario, contraseña, modo TLS y ruta a CA cuando corresponda. La prueba de conexión no guarda datos ni aplica migraciones. Guardar vuelve a validar y prepara el esquema transaccionalmente antes de persistir la conexión cifrada. La base debe existir y el usuario debe tener permisos para crear el esquema TgStrm; no se exige superusuario.
+Ruta inicial: `/setup/database`. Campos: host, puerto, nombre, usuario, contraseña, modo TLS y ruta a CA cuando corresponda. El asistente puede validar una base existente o comprobar permisos para crear una base ausente (requiere `CREATEDB` o superusuario). La prueba no crea bases ni aplica migraciones. Guardar vuelve a validar, crea solo la base ausente si se eligió esa opción, prepara el esquema transaccionalmente y persiste la conexión cifrada. Nunca elimina o reemplaza una base existente. En el runtime nativo puede sondear el puerto local; en Docker se conecta por el DNS del servicio PostgreSQL privado.
 
 La conexión mínima se almacena fuera de PostgreSQL porque se necesita antes de poder conectarse. En esta primera implementación vive en `data/database.enc` con AES-GCM y clave aleatoria persistente `data/master.key`; `data/setup.key` protege el asistente. No se almacenan en el frontend ni se devuelven secretos por la API. Respaldar configuración y clave juntas de forma protegida; el cifrado no protege frente a quien tenga acceso a ambos archivos. No reemplazar una clave ausente en una instalación existente.
 

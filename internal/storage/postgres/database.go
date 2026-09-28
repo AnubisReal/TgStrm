@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"tgstrm/internal/config"
 	"tgstrm/migrations"
@@ -55,6 +57,104 @@ func Connect(ctx context.Context, c config.Database) (*sql.DB, error) {
 		return nil, err
 	}
 	return db, nil
+}
+
+// CheckSetup verifies that the supplied role can use the requested database.
+// With createMissing enabled, it also accepts a missing database only when the
+// role has CREATEDB or superuser privilege. It never creates or migrates data.
+func CheckSetup(ctx context.Context, c config.Database, createMissing bool) error {
+	target, targetErr := Connect(ctx, c)
+	if targetErr == nil {
+		return target.Close()
+	}
+	if !createMissing || !isMissingDatabase(targetErr) {
+		return targetErr
+	}
+	if len([]byte(c.Name)) > 63 {
+		return errors.New("El nombre de base de datos no puede superar 63 bytes.")
+	}
+	maintenance := c
+	maintenance.Name = "postgres"
+	db, err := Connect(ctx, maintenance)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	var exists bool
+	if err := db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1)", c.Name).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		target, err := Connect(ctx, c)
+		if err != nil {
+			return err
+		}
+		return target.Close()
+	}
+	var allowed bool
+	if err := db.QueryRowContext(ctx, "SELECT rolsuper OR rolcreatedb FROM pg_roles WHERE rolname=current_user").Scan(&allowed); err != nil {
+		return err
+	}
+	if !allowed {
+		return errors.New("El usuario necesita el permiso CREATEDB para crear la base, o puedes elegir una base existente.")
+	}
+	return nil
+}
+
+// OpenForSetup connects to an existing database or, when explicitly requested,
+// creates the absent database owned by the connecting role. Existing database
+// contents are never dropped, replaced, or otherwise initialized here.
+func OpenForSetup(ctx context.Context, c config.Database, createMissing bool) (*sql.DB, error) {
+	target, targetErr := Connect(ctx, c)
+	if targetErr == nil {
+		return target, nil
+	}
+	if !createMissing || !isMissingDatabase(targetErr) {
+		return nil, targetErr
+	}
+	if len([]byte(c.Name)) > 63 {
+		return nil, errors.New("El nombre de base de datos no puede superar 63 bytes.")
+	}
+	maintenance := c
+	maintenance.Name = "postgres"
+	db, err := Connect(ctx, maintenance)
+	if err != nil {
+		return nil, err
+	}
+	var exists bool
+	err = db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1)", c.Name).Scan(&exists)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	if !exists {
+		var allowed bool
+		if err = db.QueryRowContext(ctx, "SELECT rolsuper OR rolcreatedb FROM pg_roles WHERE rolname=current_user").Scan(&allowed); err != nil {
+			db.Close()
+			return nil, err
+		}
+		if !allowed {
+			db.Close()
+			return nil, errors.New("El usuario necesita el permiso CREATEDB para crear la base, o puedes elegir una base existente.")
+		}
+		_, err = db.ExecContext(ctx, "CREATE DATABASE "+pgx.Identifier{c.Name}.Sanitize())
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != "42P04" {
+				db.Close()
+				return nil, err
+			}
+		}
+	}
+	if err := db.Close(); err != nil {
+		return nil, err
+	}
+	return Connect(ctx, c)
+}
+
+func isMissingDatabase(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "3D000"
 }
 
 // Migrate locks one transaction across checks and DDL, and refuses modified/newer schemas.
