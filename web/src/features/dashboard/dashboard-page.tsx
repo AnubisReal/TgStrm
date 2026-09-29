@@ -180,7 +180,13 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
   const activeMode = mode === "settings" ? "settings" : mode === "activity" ? "activity" : mode === "mirror" || mode === "mirror-manage" ? "mirror" : mode === "manage" || mode === "import" ? "manage" : workspaceMode;
   const [profile, setProfile] = useState<Profile>();
   const [failed, setFailed] = useState(false);
-  const [dark, setDark] = useState(false);
+  const [dark, setDark] = useState(() => {
+    try {
+      return window.localStorage.getItem("tgstrm.theme") === "dark";
+    } catch {
+      return false;
+    }
+  });
   const [logoutOpen, setLogoutOpen] = useState(false);
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [logoutError, setLogoutError] = useState("");
@@ -275,6 +281,14 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
     height: 0,
     top: 0,
   });
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("tgstrm.theme", dark ? "dark" : "light");
+    } catch {
+      // Theme selection still works for this page view if storage is blocked.
+    }
+  }, [dark]);
 
   useLayoutEffect(() => {
     const frame = frameRef.current;
@@ -1547,12 +1561,13 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
             <p className="eyebrow">TELEGRAM</p>
             <h2>{mode === "import" ? "Revisión TMDB" : videoId ? "Reproductor" : topicId ? "Vídeos" : groupId ? "Topics" : "Tus grupos"}</h2>
           </div>
-          {groupId && !videoId && <button className="catalog-summary" type="button" aria-label="Resumen del catálogo">
-            <span className="catalog-summary-main"><FileVideo size={14} /><strong>{topics.reduce((sum, topic) => sum + topic.video_count, 0).toLocaleString("es")} vídeos</strong></span>
-            <span className="catalog-summary-extra">· {formatBytes(topics.reduce((sum, topic) => sum + (topic.total_bytes || 0), 0) || groupVideoScan?.total_bytes || 0)}</span>
+          {groupId && !videoId && <button className="catalog-summary" type="button" aria-label={topicId ? "Resumen del topic" : "Resumen del grupo"}>
+            <span className="catalog-summary-main"><FileVideo size={14} /><strong>{topicId ? topicDetail ? topicDetail.video_count.toLocaleString("es") : "…" : topics.reduce((sum, topic) => sum + topic.video_count, 0).toLocaleString("es")} vídeos</strong></span>
+            <span className="catalog-summary-extra">· {topicId ? topicDetail ? formatBytes(topicDetail.total_bytes) : "…" : formatBytes(topics.reduce((sum, topic) => sum + (topic.total_bytes || 0), 0) || groupVideoScan?.total_bytes || 0)}</span>
             <span className="catalog-summary-detail">
-              {topics.length.toLocaleString("es")} topics · {topics.filter((topic) => topic.video_count === 0).length.toLocaleString("es")} sin vídeos cargados
-              {groupVideoScan?.status === "running" ? ` · Escaneando ${groupVideoScan.completed_topics}/${groupVideoScan.total_topics}` : ""}
+              {topicId
+                ? topicDetail ? `${topicDetail.exported_count.toLocaleString("es")} STRM · ${topicDetail.unresolved_count.toLocaleString("es")} por revisar` : "Cargando datos del topic…"
+                : <>{topics.length.toLocaleString("es")} topics · {topics.filter((topic) => topic.video_count === 0).length.toLocaleString("es")} sin vídeos cargados{groupVideoScan?.status === "running" ? ` · Escaneando ${groupVideoScan.completed_topics}/${groupVideoScan.total_topics}` : ""}</>}
             </span>
           </button>}
           <div className="topics-toolbar-actions">
