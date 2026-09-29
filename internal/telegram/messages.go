@@ -122,12 +122,31 @@ func (s *Service) Topic(ctx context.Context, groupID, topicID string) (Topic, er
 	var topic Topic
 	err := s.DB.QueryRowContext(ctx, `SELECT t.id::text,t.telegram_topic_id,t.title,COALESCE(t.icon_color,0),
 	 COALESCE(t.icon_emoji_id,0)::text,t.is_closed,t.is_hidden,t.is_pinned,t.unread_count,
-	 t.unread_mentions_count,COALESCE(t.top_message_id,0),t.telegram_created_at,t.last_message_at,t.library_kind
+	 t.unread_mentions_count,COALESCE(t.top_message_id,0),t.telegram_created_at,t.last_message_at,
+	 COALESCE(stats.video_count,0),COALESCE(stats.total_bytes,0),COALESCE(exports.exported_count,0),
+	 COALESCE(stats.unresolved_count,0),t.library_kind
 	 FROM tgstrm.topics t JOIN tgstrm.chats c ON c.id=t.chat_id
+	 LEFT JOIN LATERAL (
+	   SELECT
+	     count(DISTINCT m.id) FILTER (WHERE m.is_active AND m.media_type='video') AS video_count,
+	     COALESCE(sum(mm.byte_size) FILTER (WHERE m.is_active AND m.media_type='video'),0) AS total_bytes,
+	     count(DISTINCT sa.id) FILTER (WHERE m.is_active AND m.media_type='video' AND sa.last_export_error IS NOT NULL) AS unresolved_count
+	   FROM tgstrm.messages m
+	   LEFT JOIN tgstrm.message_media mm ON mm.message_id=m.id
+	   LEFT JOIN tgstrm.stream_assets sa ON sa.message_id=m.id
+	   WHERE m.topic_id=t.id
+	 ) stats ON true
+	 LEFT JOIN LATERAL (
+	   SELECT count(DISTINCT sa.id) AS exported_count
+	   FROM tgstrm.messages m JOIN tgstrm.stream_assets sa ON sa.message_id=m.id
+	   JOIN tgstrm.stream_exports e ON e.asset_id=sa.id AND e.status='written'
+	   WHERE m.topic_id=t.id AND m.is_active
+	 ) exports ON true
 	 WHERE t.id::text=$1 AND t.chat_id::text=$2 AND t.is_active AND c.account_id=$3 AND c.is_active`, topicID, groupID, accountID).
 		Scan(&topic.ID, &topic.TelegramID, &topic.Title, &topic.IconColor, &topic.IconEmojiID,
 			&topic.Closed, &topic.Hidden, &topic.Pinned, &topic.UnreadCount, &topic.UnreadMentionsCount,
-			&topic.TopMessageID, &topic.CreatedAt, &topic.LastMessageAt, &topic.LibraryKind)
+			&topic.TopMessageID, &topic.CreatedAt, &topic.LastMessageAt, &topic.VideoCount, &topic.TotalBytes,
+			&topic.ExportedCount, &topic.UnresolvedCount, &topic.LibraryKind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Topic{}, ErrTopicNotFound
 	}

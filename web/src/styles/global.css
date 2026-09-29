@@ -938,7 +938,8 @@ fieldset:disabled {
 .tmdb-search-row { display: flex; gap: 9px; }
 .tmdb-search-row .group-search { flex: 1; }
 .tmdb-search-row > button, .tmdb-result > button {
-  min-height: 40px; border: 0; border-radius: 999px; padding: 0 15px;
+  min-height: 40px; display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  border: 0; border-radius: 999px; padding: 0 15px;
   background: #292925; color: #fff; font: inherit; font-size: 11px; cursor: pointer;
 }
 .tmdb-search-row button:disabled, .tmdb-result button:disabled { opacity: .5; cursor: default; }

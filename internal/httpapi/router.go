@@ -539,6 +539,17 @@ func (a *API) topicMessages(w http.ResponseWriter, r *http.Request) {
 			log.Printf("refresh topic messages group=%s topic=%s: %v", groupID, topicID, err)
 			syncState = "stale"
 		} else {
+			// Refresh the topic summary after Telegram's messages and media have
+			// been persisted, so the response includes their current counts/bytes.
+			topic, err = service.Topic(r.Context(), groupID, topicID)
+			if errors.Is(err, telegramauth.ErrTopicNotFound) {
+				fail(w, 404, "topic_not_found", "El topic no está disponible.")
+				return
+			}
+			if err != nil {
+				fail(w, 500, "topic_failed", "No se pudieron cargar las estadísticas del topic.")
+				return
+			}
 			messages, hasMore, err = service.TopicMessages(r.Context(), topicID, before, 50)
 			if err != nil {
 				fail(w, 500, "messages_failed", "No se pudieron cargar los mensajes.")

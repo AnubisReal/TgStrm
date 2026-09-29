@@ -40,7 +40,7 @@ Mientras el repositorio continúe privado, configura también el registro `ghcr.
 Después añade estas variables con las rutas reales del servidor:
 
 ```text
-TGSTRM_IMAGE=ghcr.io/anubisreal/tgstrm:v0.1.6
+TGSTRM_IMAGE=ghcr.io/anubisreal/tgstrm:v0.1.7
 TGSTRM_DATA_DIR_HOST=/instalaciones/tgstrm/data
 TGSTRM_MOVIES_DIR_HOST=/extraible2/strm/movies
 TGSTRM_SHOWS_DIR_HOST=/extraible2/strm/series
@@ -79,7 +79,7 @@ go run ./cmd/tgstrm
 cd web && npm ci && npm run dev
 ```
 
-La API escucha en `127.0.0.1:5151` y Vite en `5173`. Para exponerla en una red local se requiere `TGSTRM_ALLOW_REMOTE=1` y una dirección de escucha no loopback.
+La API escucha en `127.0.0.1:5151` y Vite en `5173`. Para probar desde la LAN, inicia Go con `TGSTRM_ADDR=0.0.0.0:5151 TGSTRM_ALLOW_REMOTE=1 go run ./cmd/tgstrm` y Vite con `npm run dev -- --host 0.0.0.0`. Añade el hostname usado por el navegador a `TGSTRM_ALLOWED_HOSTS` si Vite rechaza una IP o un dominio.
 
 ## Datos y seguridad
 

@@ -26,15 +26,21 @@ $env:TGSTRM_DATA_DIR = 'C:\TgStrm\data'
 .\tgstrm.exe
 ```
 
-La dirección predeterminada es `127.0.0.1:5151`. Para poner un proxy inverso delante del binario:
+Para permitir conexiones desde la LAN en Windows, establece también antes de arrancar:
 
-```sh
-TGSTRM_ADDR=0.0.0.0:5151
-TGSTRM_ALLOW_REMOTE=1
-TGSTRM_TRUSTED_PROXY_CIDRS=SUBRED_REAL_DEL_PROXY
+```powershell
+$env:TGSTRM_ADDR = '0.0.0.0:5151'
+$env:TGSTRM_ALLOW_REMOTE = '1'
+.\tgstrm.exe
 ```
 
-No abrir el puerto a Internet directamente. El proxy debe terminar HTTPS y enviar `X-Forwarded-Proto: https`. La aplicación aceptará esa cabecera solo si la IP inmediata pertenece a `TGSTRM_TRUSTED_PROXY_CIDRS`.
+La dirección predeterminada es `127.0.0.1:5151`, accesible solo desde el mismo equipo. Para acceder desde otros dispositivos de la LAN o desde NPM hacia el binario nativo, arráncalo con escucha de red habilitada:
+
+```sh
+TGSTRM_ADDR=0.0.0.0:5151 TGSTRM_ALLOW_REMOTE=1 TGSTRM_DATA_DIR=/ruta/privada/tgstrm-data ./tgstrm
+```
+
+Después podrás abrir `http://IP_LOCAL_DEL_EQUIPO:5151` desde la LAN y configurar NPM para que reenvíe al mismo IP y puerto. `TGSTRM_ALLOW_REMOTE=1` es obligatorio para evitar exponer el servicio por accidente; no abras el puerto directamente a Internet. El proxy debe terminar HTTPS y enviar `X-Forwarded-Proto: https`. La aplicación aceptará esa cabecera solo si la IP inmediata pertenece a `TGSTRM_TRUSTED_PROXY_CIDRS`; configura ese valor con la subred real del proxy.
 
 Al abrir el panel por primera vez, introducir PostgreSQL en el asistente y conectar Telegram. La configuración y la sesión quedarán dentro de `TGSTRM_DATA_DIR` tras reiniciar o actualizar el binario.
 
