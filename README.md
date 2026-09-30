@@ -3,15 +3,19 @@
 </p>
 
 <p align="center">
-  <strong>Tu catálogo de Telegram, convertido en una biblioteca multimedia estable.</strong><br>
-  Sin sesiones en los enlaces. Sin depender de Vite para servir el panel.
+  <strong>Tu catálogo de Telegram, convertido en una biblioteca multimedia estable.</strong>
 </p>
 
 <p align="center">
-  <a href="https://github.com/AnubisReal/TgStrm/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/AnubisReal/TgStrm/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="https://github.com/AnubisReal/TgStrm/releases"><img alt="Release" src="https://img.shields.io/github/v/release/AnubisReal/TgStrm?display_name=tag&sort=semver"></a>
-  <img alt="Go" src="https://img.shields.io/badge/Go-1.26-334d39?logo=go&logoColor=white">
-  <img alt="Docker" src="https://img.shields.io/badge/Docker-ready-334d39?logo=docker&logoColor=white">
+  <img alt="Telegram catálogo multimedia" src="https://img.shields.io/badge/Telegram-cat%C3%A1logo%20multimedia-334d39?style=flat-square&logo=telegram&logoColor=white">
+  <img alt="TMDB metadatos" src="https://img.shields.io/badge/TMDB-metadatos-334d39?style=flat-square&logo=themoviedatabase&logoColor=white">
+  <img alt="STRM biblioteca" src="https://img.shields.io/badge/STRM-biblioteca-334d39?style=flat-square">
+</p>
+
+<p align="center">
+  <img alt="Go API en tiempo real" src="https://img.shields.io/badge/Go-API%20en%20tiempo%20real-1f1d18?style=flat-square&logo=go&logoColor=white">
+  <img alt="Docker Portainer" src="https://img.shields.io/badge/Docker-Portainer-1f1d18?style=flat-square&logo=docker&logoColor=white">
+  <a href="https://www.instagram.com/anubisreal/"><img alt="Instagram @anubisreal" src="https://img.shields.io/badge/Instagram-%40anubisreal-E4405F?style=flat-square&logo=instagram&logoColor=white"></a>
 </p>
 
 ---
