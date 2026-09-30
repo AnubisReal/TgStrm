@@ -3,19 +3,17 @@
 </p>
 
 <p align="center">
-  <strong>Tu catálogo de Telegram, convertido en una biblioteca multimedia estable.</strong>
+  <strong>Tu catálogo de Telegram, convertido en una biblioteca multimedia estable.</strong><br>
+  Organiza, sincroniza y transforma tus vídeos de Telegram en una biblioteca lista para reproducir.<br>
+  <sub>Metadatos TMDB · archivos STRM · sincronización en tiempo real</sub>
 </p>
 
 <p align="center">
-  <img alt="Telegram catálogo multimedia" src="https://img.shields.io/badge/Telegram-cat%C3%A1logo%20multimedia-334d39?style=flat-square&logo=telegram&logoColor=white">
-  <img alt="TMDB metadatos" src="https://img.shields.io/badge/TMDB-metadatos-334d39?style=flat-square&logo=themoviedatabase&logoColor=white">
-  <img alt="STRM biblioteca" src="https://img.shields.io/badge/STRM-biblioteca-334d39?style=flat-square">
-</p>
-
-<p align="center">
-  <img alt="Go API en tiempo real" src="https://img.shields.io/badge/Go-API%20en%20tiempo%20real-1f1d18?style=flat-square&logo=go&logoColor=white">
-  <img alt="Docker Portainer" src="https://img.shields.io/badge/Docker-Portainer-1f1d18?style=flat-square&logo=docker&logoColor=white">
-  <a href="https://www.instagram.com/anubisreal/"><img alt="Instagram @anubisreal" src="https://img.shields.io/badge/Instagram-%40anubisreal-E4405F?style=flat-square&logo=instagram&logoColor=white"></a>
+  <img alt="Telegram" src="https://img.shields.io/badge/Telegram-334d39?style=flat-square&logo=telegram&logoColor=white">
+  <img alt="TMDB" src="https://img.shields.io/badge/TMDB-334d39?style=flat-square&logo=themoviedatabase&logoColor=white">
+  <img alt="Go" src="https://img.shields.io/badge/Go-1f1d18?style=flat-square&logo=go&logoColor=white">
+  <img alt="Docker" src="https://img.shields.io/badge/Docker-1f1d18?style=flat-square&logo=docker&logoColor=white">
+  <a href="https://www.instagram.com/anubisreal/"><img alt="Instagram @anubisreal" src="https://img.shields.io/badge/%40anubisreal-E4405F?style=flat-square&logo=instagram&logoColor=white"></a>
 </p>
 
 ---
