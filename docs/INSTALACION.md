@@ -40,7 +40,7 @@ La dirección predeterminada es `127.0.0.1:5151`, accesible solo desde el mismo 
 TGSTRM_ADDR=0.0.0.0:5151 TGSTRM_ALLOW_REMOTE=1 TGSTRM_DATA_DIR=/ruta/privada/tgstrm-data ./tgstrm
 ```
 
-Después podrás abrir `http://IP_LOCAL_DEL_EQUIPO:5151` desde la LAN y configurar NPM para que reenvíe al mismo IP y puerto. `TGSTRM_ALLOW_REMOTE=1` es obligatorio para evitar exponer el servicio por accidente; no abras el puerto directamente a Internet. El proxy debe terminar HTTPS y enviar `X-Forwarded-Proto: https`. La aplicación aceptará esa cabecera solo si la IP inmediata pertenece a `TGSTRM_TRUSTED_PROXY_CIDRS`; configura ese valor con la subred real del proxy.
+Después podrás abrir `http://IP_LOCAL_DEL_EQUIPO:5151` desde la LAN y configurar NPM para que reenvíe al mismo IP y puerto. `TGSTRM_ALLOW_REMOTE=1` es obligatorio para evitar exponer el servicio por accidente; no abras el puerto directamente a Internet. La instalación estándar no necesita configurar redes ni CIDR. `TGSTRM_TRUSTED_PROXY_CIDRS` queda como endurecimiento opcional para una topología donde se conoce y administra la red privada exacta del proxy.
 
 Al abrir el panel por primera vez, introducir PostgreSQL en el asistente y conectar Telegram. La configuración y la sesión quedarán dentro de `TGSTRM_DATA_DIR` tras reiniciar o actualizar el binario.
 
@@ -54,18 +54,7 @@ Usa `compose.yaml` de la raíz como Stack recomendado. En Portainer, selecciona 
 
 El Stack principal incluye un trabajo breve de inicialización que crea o verifica el usuario limitado de TgStrm antes de arrancar la aplicación. No usa rutas relativas del repositorio ni requiere una versión especial de Compose para montar scripts. PostgreSQL no publica el puerto `5432` al servidor.
 
-Copiar los valores de `deploy/portainer.env.example` al Stack y cambiar al menos:
-
-```text
-POSTGRES_PASSWORD=SECRETO_ADMIN_DE_POSTGRES
-TGSTRM_DATABASE_PASSWORD=SECRETO_DE_LA_CUENTA_TGSTRM
-TGSTRM_DATA_DIR_HOST=/instalaciones/tgstrm/data
-TGSTRM_MOVIES_DIR_HOST=/extraible2/strm/movies
-TGSTRM_SHOWS_DIR_HOST=/extraible2/strm/series
-TGSTRM_PORT=5151
-PUID=1000
-PGID=1000
-```
+En **Load variables from .env file** de Portainer carga `.env.example` desde la raíz del repositorio. Edita antes `POSTGRES_PASSWORD` y `TGSTRM_DATABASE_PASSWORD`: son obligatorias, distintas y no pueden quedar vacías. Las rutas, el puerto y `PUID`/`PGID` se pueden ajustar a tu servidor.
 
 Crear esas tres rutas y permitir escritura a `PUID:PGID`. En el panel, los destinos deben ser `/media/movies` y `/media/shows`: son las rutas del contenedor, no las del host.
 
