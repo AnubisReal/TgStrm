@@ -27,18 +27,18 @@
 
 <table>
   <tr>
-    <td width="33%" align="left" valign="top">
-      <sub><strong>01 · CATÁLOGO</strong></sub><br><br>
+    <td width="33%" align="center" valign="top">
+      <sub><strong>CATÁLOGO</strong></sub><br><br>
       <strong>Siempre al día.</strong><br>
       <sub>Los grupos, topics y vídeos se mantienen sincronizados con Telegram.</sub>
     </td>
-    <td width="33%" align="left" valign="top">
-      <sub><strong>02 · METADATOS</strong></sub><br><br>
+    <td width="33%" align="center" valign="top">
+      <sub><strong>METADATOS</strong></sub><br><br>
       <strong>Reconoce lo que guardas.</strong><br>
       <sub>TMDB aporta títulos, años, pósteres y episodios para ordenar tu colección.</sub>
     </td>
-    <td width="33%" align="left" valign="top">
-      <sub><strong>03 · BIBLIOTECA</strong></sub><br><br>
+    <td width="33%" align="center" valign="top">
+      <sub><strong>BIBLIOTECA</strong></sub><br><br>
       <strong>Lista para ver.</strong><br>
       <sub>Genera archivos STRM estables para reproducir tu contenido donde prefieras.</sub>
     </td>
