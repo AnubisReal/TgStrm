@@ -1,0 +1,85 @@
+# Default Portainer/Docker deployment. Publish TgStrm on every host interface;
+# point Nginx Proxy Manager to the server's LAN IP and TGSTRM_PORT.
+services:
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: tgstrm
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in Portainer}
+      TGSTRM_DATABASE_PASSWORD: ${TGSTRM_DATABASE_PASSWORD:?Set TGSTRM_DATABASE_PASSWORD in Portainer}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    configs:
+      - source: postgres_init
+        target: /docker-entrypoint-initdb.d/10-tgstrm-app-user.sh
+    networks: [database]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+
+  tgstrm:
+    image: ${TGSTRM_IMAGE:-ghcr.io/anubisreal/tgstrm:latest}
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      TGSTRM_ADDR: :5151
+      TGSTRM_ALLOW_REMOTE: "1"
+      TGSTRM_DATA_DIR: /data
+      TGSTRM_DATABASE_SETUP_MODE: container
+      TGSTRM_TRUSTED_PROXY_CIDRS: ${TGSTRM_TRUSTED_PROXY_CIDRS:-}
+    volumes:
+      - ${TGSTRM_DATA_DIR_HOST:-/instalaciones/tgstrm/data}:/data
+      - ${TGSTRM_MOVIES_DIR_HOST:-/extraible2/strm/movies}:/media/movies
+      - ${TGSTRM_SHOWS_DIR_HOST:-/extraible2/strm/series}:/media/shows
+    ports:
+      - "${TGSTRM_PORT:-5151}:5151"
+    networks: [database, egress]
+    depends_on:
+      postgres:
+        condition: service_healthy
+        restart: true
+    healthcheck:
+      test: ["CMD", "/tgstrm", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  database:
+    internal: true
+  egress:
+    driver: bridge
+
+volumes:
+  postgres_data:
+
+# Inline config avoids a repository-relative bind mount, which Portainer CE
+# cannot use for Git stacks. PostgreSQL runs it only on an empty data volume.
+configs:
+  postgres_init:
+    content: |
+      #!/bin/sh
+      set -eu
+      : "$${POSTGRES_USER:?POSTGRES_USER is required}"
+      : "$${POSTGRES_DB:?POSTGRES_DB is required}"
+      : "$${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+      : "$${TGSTRM_DATABASE_PASSWORD:?TGSTRM_DATABASE_PASSWORD is required}"
+      PGPASSWORD="$$POSTGRES_PASSWORD" psql \
+        --username "$$POSTGRES_USER" \
+        --dbname postgres \
+        --set ON_ERROR_STOP=1 \
+        --set app_password="$$TGSTRM_DATABASE_PASSWORD" \
+        --set app_database="$$POSTGRES_DB" <<'SQL'
+      CREATE ROLE tgstrm LOGIN PASSWORD :'app_password';
+      ALTER DATABASE :"app_database" OWNER TO tgstrm;
+      SQL

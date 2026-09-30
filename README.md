@@ -27,12 +27,12 @@ La aplicación conserva la configuración cifrada, la sesión de Telegram y el c
 
 ## Despliegue en Portainer
 
-El Stack listo para importar es [deploy/stack.portainer.yml](deploy/stack.portainer.yml). Está preparado para Nginx Proxy Manager en Docker: TgStrm no publica puertos y NPM lo alcanza mediante la red privada compartida.
+El Stack recomendado es [compose.yaml](compose.yaml). Incluye TgStrm y PostgreSQL en contenedores separados. Publica el puerto `5151` del contenedor en el `5151` del servidor, accesible desde la LAN. PostgreSQL no publica ningún puerto.
 
 En **Portainer → Stacks → Add stack**, selecciona **Repository**, apunta a este repositorio y usa:
 
 ```text
-Compose path: deploy/stack.portainer.yml
+Compose path: compose.yaml
 ```
 
 Mientras el repositorio continúe privado, configura también el registro `ghcr.io` en Portainer con una credencial de GitHub que tenga permiso de lectura de paquetes. Esa credencial se queda en Portainer; no se añade al Stack ni al repositorio.
@@ -40,21 +40,21 @@ Mientras el repositorio continúe privado, configura también el registro `ghcr.
 Después añade estas variables con las rutas reales del servidor:
 
 ```text
-TGSTRM_IMAGE=ghcr.io/anubisreal/tgstrm:v0.1.7
+POSTGRES_PASSWORD=SECRETO_ADMIN_DE_POSTGRES
+TGSTRM_DATABASE_PASSWORD=SECRETO_DISTINTO_PARA_TGSTRM
 TGSTRM_DATA_DIR_HOST=/instalaciones/tgstrm/data
 TGSTRM_MOVIES_DIR_HOST=/extraible2/strm/movies
 TGSTRM_SHOWS_DIR_HOST=/extraible2/strm/series
-TGSTRM_NPM_NETWORK=npm_default
-TGSTRM_TRUSTED_PROXY_CIDRS=172.18.0.0/16
+TGSTRM_PORT=5151
 PUID=1000
 PGID=1000
 ```
 
-`TGSTRM_NPM_NETWORK` y `TGSTRM_TRUSTED_PROXY_CIDRS` deben corresponder a la red real de NPM. Se obtienen con `docker network inspect NOMBRE_RED`. En NPM crea un Proxy Host HTTPS hacia `tgstrm`, puerto `5151`, con WebSocket activado. En los ajustes de TgStrm usa `/media/movies` y `/media/shows`: son rutas internas del contenedor.
+En NPM crea un Proxy Host HTTPS hacia la IP LAN del servidor, por ejemplo `192.168.0.70`, puerto `5151`, con WebSocket activado. Si el puerto del host está ocupado, cambia solo `TGSTRM_PORT` (por ejemplo `5152`) y usa ese puerto en NPM; el puerto interno sigue siendo `5151`. La imagen predeterminada es `ghcr.io/anubisreal/tgstrm:latest`; puedes fijar un tag con `TGSTRM_IMAGE`. Para actualizar una etiqueta `latest` ya desplegada, activa **Re-pull image** al redeplegar en Portainer. Si NPM se ejecuta en Docker, configura `TGSTRM_TRUSTED_PROXY_CIDRS` con la subred real de su contenedor para que TgStrm acepte correctamente `X-Forwarded-Proto`.
 
 > Los tres directorios del host deben existir y pertenecer a `PUID:PGID`. `/data` es el estado de TgStrm; películas y series son bibliotecas independientes. No elimines `/data` al actualizar.
 
-La plantilla de variables está en [deploy/portainer.env.example](deploy/portainer.env.example). Para una instalación nueva con PostgreSQL persistente usa [Portainer con NPM en el host](deploy/compose.portainer.postgres.yml) o [Portainer con NPM en Docker](deploy/compose.portainer.postgres.npm.yml). Las plantillas sin base integrada siguen disponibles para instalaciones que ya usan PostgreSQL externo.
+En el primer inicio del panel, conecta con el servidor PostgreSQL `postgres`, base `tgstrm`, usuario `tgstrm` y la contraseña `TGSTRM_DATABASE_PASSWORD`. La plantilla de variables está en [deploy/portainer.env.example](deploy/portainer.env.example). Las plantillas antiguas de `deploy/` siguen disponibles para instalaciones existentes con otra topología.
 
 ## Releases nativas
 
@@ -83,7 +83,7 @@ La API escucha en `127.0.0.1:5151` y Vite en `5173`. Para probar desde la LAN, i
 
 ## Datos y seguridad
 
-PostgreSQL es externo: TgStrm cifra y conserva su conexión, pero no instala ni administra PostgreSQL. El repositorio ignora `data/`, sesiones, claves, copias, STRM generados, el proyecto antiguo, dependencias y auditorías locales.
+PostgreSQL corre como servicio separado en Docker o como instalación externa con el binario nativo. TgStrm cifra y conserva su conexión, pero no administra PostgreSQL. El repositorio ignora `data/`, sesiones, claves, copias, STRM generados, el proyecto antiguo, dependencias y auditorías locales.
 
 Antes de publicar cambios, comprueba el índice:
 
@@ -99,7 +99,7 @@ Nunca fuerces la inclusión de `data/` ni compartas una copia de seguridad, una 
 
 - [Instalación, actualización y recuperación](docs/INSTALACION.md)
 - [Checklist de entrega y distribución](docs/ENTREGA_Y_DISTRIBUCION.md)
-- [Stack de Portainer](deploy/stack.portainer.yml)
+- [Stack de Portainer](compose.yaml)
 - [Última release](https://github.com/AnubisReal/TgStrm/releases/latest)
 
 ```sh

@@ -50,31 +50,30 @@ Si PostgreSQL no está instalado, el asistente enlaza las páginas oficiales de 
 
 ## Portainer y Docker
 
-- `deploy/compose.portainer.yml` sirve para NPM que alcanza TgStrm mediante el host y liga `127.0.0.1:5151` por defecto.
-- `deploy/compose.portainer.npm.yml` sirve para NPM en Docker: ambos comparten una red y NPM llega a `tgstrm:5151`.
-- `deploy/compose.portainer.postgres.yml` es la instalación nueva recomendada con PostgreSQL integrado y un volumen independiente para la base.
-- `deploy/compose.portainer.postgres.npm.yml` es la variante integrada para NPM dentro de Docker; NPM debe estar conectado a la red externa que se configure en Portainer.
+Usa `compose.yaml` de la raíz como Stack recomendado. En Portainer, selecciona **Git Repository** y pon `compose.yaml` en **Compose path**. Incluye PostgreSQL separado y publica TgStrm en todas las interfaces del servidor con `5151:5151` por defecto; NPM puede apuntar a `IP_LAN_DEL_SERVIDOR:5151` aunque esté en otro contenedor. Si el puerto exterior está ocupado, define `TGSTRM_PORT=5152` y apunta NPM a `IP_LAN_DEL_SERVIDOR:5152`. No hace falta conectar NPM a la red interna de este Stack. Las plantillas de `deploy/` son alternativas para instalaciones anteriores o topologías especiales.
+
+El Stack principal lleva el script de creación del usuario PostgreSQL incorporado como una configuración de Compose, sin montaje relativo de archivos. Requiere Docker Compose 2.23.1 o posterior. PostgreSQL no publica el puerto `5432` al servidor.
 
 Copiar los valores de `deploy/portainer.env.example` al Stack y cambiar al menos:
 
 ```text
-TGSTRM_IMAGE=ghcr.io/PROPIETARIO_GITHUB/tgstrm:X.Y.Z
 POSTGRES_PASSWORD=SECRETO_ADMIN_DE_POSTGRES
 TGSTRM_DATABASE_PASSWORD=SECRETO_DE_LA_CUENTA_TGSTRM
 TGSTRM_DATA_DIR_HOST=/instalaciones/tgstrm/data
 TGSTRM_MOVIES_DIR_HOST=/extraible2/strm/movies
 TGSTRM_SHOWS_DIR_HOST=/extraible2/strm/series
+TGSTRM_PORT=5151
 PUID=1000
 PGID=1000
 ```
 
 Crear esas tres rutas y permitir escritura a `PUID:PGID`. En el panel, los destinos deben ser `/media/movies` y `/media/shows`: son las rutas del contenedor, no las del host.
 
-En los dos Stack con PostgreSQL integrado, establece dos secretos distintos en Portainer. `POSTGRES_PASSWORD` es solo para la cuenta administradora del servidor y no se introduce en TgStrm. El script de inicio del volumen crea una cuenta `tgstrm` limitada a su base, usando `TGSTRM_DATABASE_PASSWORD`; en el asistente web elige la base `tgstrm`, el usuario `tgstrm` y esa segunda contraseña. La cuenta de la aplicación no es superusuario ni recibe `CREATEDB`. El servidor de base de datos no publica puertos al host y solo comparte una red interna con TgStrm; el volumen `postgres_data` es independiente de `/data` y de las carpetas de STRM. Usa la etiqueta mayor fija `postgres:18` y conserva ese volumen al actualizar. Un cambio de versión mayor de PostgreSQL requiere un procedimiento de actualización y copia de seguridad propio; no basta con cambiar el número de etiqueta.
+En el Stack principal establece dos secretos distintos en Portainer. `POSTGRES_PASSWORD` es solo para la cuenta administradora del servidor y no se introduce en TgStrm. El script de inicio del volumen crea una cuenta `tgstrm` limitada a su base, usando `TGSTRM_DATABASE_PASSWORD`; en el asistente web elige servidor `postgres`, base `tgstrm`, usuario `tgstrm` y esa segunda contraseña. La cuenta de la aplicación no es superusuario ni recibe `CREATEDB`. El servidor de base de datos no publica puertos al host y solo comparte una red interna con TgStrm; el volumen `postgres_data` es independiente de `/data` y de las carpetas de STRM. Usa la etiqueta mayor fija `postgres:18` y conserva ese volumen al actualizar. Un cambio de versión mayor de PostgreSQL requiere un procedimiento de actualización y copia de seguridad propio; no basta con cambiar el número de etiqueta.
 
 La imagen oficial aplica `POSTGRES_USER`, `POSTGRES_DB` y `POSTGRES_PASSWORD` solo al inicializar un volumen vacío. Cambiar estas variables después no rota la contraseña en un volumen ya creado; haz esa rotación con PostgreSQL y actualiza después la conexión guardada en TgStrm.
 
-Para NPM en Docker, consultar `docker network inspect NOMBRE_RED` y usar su subred real —por ejemplo `172.18.0.0/16`— en `TGSTRM_TRUSTED_PROXY_CIDRS`; nunca una red abierta. En NPM crear un Proxy Host HTTPS hacia `tgstrm`, puerto `5151`, con WebSocket activado.
+Para NPM en Docker, consultar `docker network inspect NOMBRE_RED` y usar su subred real —por ejemplo `172.18.0.0/16`— en `TGSTRM_TRUSTED_PROXY_CIDRS`; nunca una red abierta. En NPM crear un Proxy Host HTTPS hacia la IP LAN del servidor y `TGSTRM_PORT`, con WebSocket activado.
 
 La imagen separa el estado persistente del sistema de archivos efímero del
 contenedor: `/data` debe seguir montado al mismo directorio del host al
