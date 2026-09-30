@@ -37,8 +37,8 @@ services:
           printf '%s\n' "CREATE ROLE tgstrm LOGIN PASSWORD :'app_password';" \
             | psql --dbname postgres --set ON_ERROR_STOP=1 --set app_password="$$TGSTRM_DATABASE_PASSWORD"
         fi
-        printf '%s\n' "ALTER ROLE tgstrm PASSWORD :'app_password';" 'ALTER DATABASE :"app_database" OWNER TO tgstrm;' \
-          | psql --dbname postgres --set ON_ERROR_STOP=1 --set app_password="$$TGSTRM_DATABASE_PASSWORD" --set app_database=tgstrm
+        printf '%s\n' 'ALTER DATABASE :"app_database" OWNER TO tgstrm;' \
+          | psql --dbname postgres --set ON_ERROR_STOP=1 --set app_database=tgstrm
     networks: [database]
     depends_on:
       postgres:

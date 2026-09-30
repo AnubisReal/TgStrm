@@ -21,7 +21,7 @@ services:
       - no-new-privileges:true
 
   # This one-off job is idempotent: it creates the restricted application role
-  # if needed and ensures its password and database ownership are current.
+  # only when absent, then ensures the TgStrm database has that limited owner.
   postgres-bootstrap:
     image: postgres:18
     restart: "no"
@@ -38,8 +38,8 @@ services:
           printf '%s\n' "CREATE ROLE tgstrm LOGIN PASSWORD :'app_password';" \
             | psql --dbname postgres --set ON_ERROR_STOP=1 --set app_password="$$TGSTRM_DATABASE_PASSWORD"
         fi
-        printf '%s\n' "ALTER ROLE tgstrm PASSWORD :'app_password';" 'ALTER DATABASE :"app_database" OWNER TO tgstrm;' \
-          | psql --dbname postgres --set ON_ERROR_STOP=1 --set app_password="$$TGSTRM_DATABASE_PASSWORD" --set app_database=tgstrm
+        printf '%s\n' 'ALTER DATABASE :"app_database" OWNER TO tgstrm;' \
+          | psql --dbname postgres --set ON_ERROR_STOP=1 --set app_database=tgstrm
     networks: [database]
     depends_on:
       postgres:
