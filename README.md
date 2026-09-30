@@ -76,15 +76,7 @@
 
 ### Portainer
 
-1. Crea en tu servidor las carpetas que conservarán la instalación y las bibliotecas:
-
-   ```text
-   /instalaciones/tgstrm/data
-   /extraible2/strm/movies
-   /extraible2/strm/series
-   ```
-
-2. En **Portainer → Stacks → Add stack**, elige **Git Repository** y configura:
+1. En **Portainer → Stacks → Add stack**, elige **Git Repository** y configura:
 
    ```text
    Repository URL: https://github.com/AnubisReal/TgStrm.git
@@ -94,7 +86,7 @@
 
    Si tu copia del repositorio es privada, usa las credenciales de GitHub en Portainer.
 
-3. En las variables del Stack, copia este bloque. Cambia únicamente las dos contraseñas y las rutas si usas otras unidades:
+2. En las variables del Stack, copia este bloque. Cambia las dos contraseñas y, si lo necesitas, las rutas de tu servidor:
 
    ```dotenv
    POSTGRES_PASSWORD=elige-una-contrasena-larga-y-unica
@@ -108,9 +100,11 @@
    PGID=1000
    ```
 
-4. Pulsa **Deploy the stack** y abre `http://IP_DE_TU_SERVIDOR:5151`.
+   Docker crea estas carpetas si aún no existen. Elige las rutas definitivas antes del primer despliegue: ahí quedarán el estado del servidor y tu biblioteca.
 
-5. En el primer inicio, conecta Telegram y, en el asistente de base de datos, usa:
+3. Pulsa **Deploy the stack** y abre `http://IP_DE_TU_SERVIDOR:5151`.
+
+4. En el primer inicio, conecta Telegram y, en el asistente de base de datos, usa:
 
    ```text
    Servidor: postgres
