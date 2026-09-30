@@ -21,23 +21,26 @@
 ## Qué hace
 
 <p align="center">
-  <strong>Del grupo de Telegram a tu biblioteca, sin pasos manuales.</strong><br>
-  <sub>TgStrm organiza tus vídeos, encuentra su información y mantiene tu catálogo preparado para reproducir.</sub>
+  <strong>Tu biblioteca multimedia, construida desde Telegram.</strong><br>
+  <sub>Organiza tus vídeos, identifica cada título y mantenlo listo para reproducir.</sub>
 </p>
 
 <table>
   <tr>
-    <td width="33%" align="center" valign="top">
-      <strong>Catálogo vivo</strong><br>
-      <sub>Detecta grupos, topics y archivos de Telegram en tiempo real.</sub>
+    <td width="33%" align="left" valign="top">
+      <sub><strong>01 · CATÁLOGO</strong></sub><br><br>
+      <strong>Siempre al día.</strong><br>
+      <sub>Los grupos, topics y vídeos se mantienen sincronizados con Telegram.</sub>
     </td>
-    <td width="33%" align="center" valign="top">
-      <strong>Información correcta</strong><br>
-      <sub>Relaciona películas, series y episodios con TMDB para mostrar sus pósteres y datos.</sub>
+    <td width="33%" align="left" valign="top">
+      <sub><strong>02 · METADATOS</strong></sub><br><br>
+      <strong>Reconoce lo que guardas.</strong><br>
+      <sub>TMDB aporta títulos, años, pósteres y episodios para ordenar tu colección.</sub>
     </td>
-    <td width="33%" align="center" valign="top">
-      <strong>Biblioteca lista</strong><br>
-      <sub>Crea y actualiza tus archivos <code>.strm</code> de forma segura y persistente.</sub>
+    <td width="33%" align="left" valign="top">
+      <sub><strong>03 · BIBLIOTECA</strong></sub><br><br>
+      <strong>Lista para ver.</strong><br>
+      <sub>Genera archivos STRM estables para reproducir tu contenido donde prefieras.</sub>
     </td>
   </tr>
 </table>
