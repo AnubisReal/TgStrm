@@ -1,4 +1,4 @@
-# Fresh Portainer installs with an app-private PostgreSQL service.
+# Advanced variant with a host-restricted application port.
 # Keep POSTGRES_PASSWORD in Portainer's stack environment; do not commit it.
 services:
   postgres:
@@ -9,11 +9,9 @@ services:
       POSTGRES_DB: tgstrm
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in Portainer}
-      TGSTRM_DATABASE_PASSWORD: ${TGSTRM_DATABASE_PASSWORD:?Set TGSTRM_DATABASE_PASSWORD in Portainer}
     volumes:
       # PostgreSQL 18's official image stores versioned data below this path.
       - postgres_data:/var/lib/postgresql
-      - ./postgres-init.sh:/docker-entrypoint-initdb.d/10-tgstrm-app-user.sh:ro
     networks: [database]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
@@ -24,8 +22,34 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  # Avoids a repository-relative bind mount and is safe to run on every deploy.
+  postgres-bootstrap:
+    image: postgres:18
+    restart: "no"
+    environment:
+      PGHOST: postgres
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in Portainer}
+      TGSTRM_DATABASE_PASSWORD: ${TGSTRM_DATABASE_PASSWORD:?Set TGSTRM_DATABASE_PASSWORD in Portainer}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        role_exists="$$(psql --dbname postgres --tuples-only --no-align --command "SELECT 1 FROM pg_roles WHERE rolname = 'tgstrm'")"
+        if [ "$$role_exists" != "1" ]; then
+          printf '%s\n' "CREATE ROLE tgstrm LOGIN PASSWORD :'app_password';" \
+            | psql --dbname postgres --set ON_ERROR_STOP=1 --set app_password="$$TGSTRM_DATABASE_PASSWORD"
+        fi
+        printf '%s\n' "ALTER ROLE tgstrm PASSWORD :'app_password';" 'ALTER DATABASE :"app_database" OWNER TO tgstrm;' \
+          | psql --dbname postgres --set ON_ERROR_STOP=1 --set app_password="$$TGSTRM_DATABASE_PASSWORD" --set app_database=tgstrm
+    networks: [database]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+
   tgstrm:
-    image: ${TGSTRM_IMAGE:-ghcr.io/REPLACE_WITH_GITHUB_OWNER/tgstrm:latest}
+    image: ${TGSTRM_IMAGE:-ghcr.io/anubisreal/tgstrm:latest}
     container_name: tgstrm
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
@@ -46,6 +70,8 @@ services:
       postgres:
         condition: service_healthy
         restart: true
+      postgres-bootstrap:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "/tgstrm", "healthcheck"]
       interval: 30s

@@ -1,4 +1,4 @@
-# Fresh all-in-one install when Nginx Proxy Manager is a Docker service.
+# Advanced all-in-one variant when Nginx Proxy Manager is a Docker service.
 # TgStrm and PostgreSQL share only a private app network; NPM joins its own
 # existing network and reaches the app at http://tgstrm:5151.
 services:
@@ -10,10 +10,8 @@ services:
       POSTGRES_DB: tgstrm
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in Portainer}
-      TGSTRM_DATABASE_PASSWORD: ${TGSTRM_DATABASE_PASSWORD:?Set TGSTRM_DATABASE_PASSWORD in Portainer}
     volumes:
       - postgres_data:/var/lib/postgresql
-      - ./postgres-init.sh:/docker-entrypoint-initdb.d/10-tgstrm-app-user.sh:ro
     networks: [database]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
@@ -23,8 +21,32 @@ services:
       start_period: 30s
     security_opt: ["no-new-privileges:true"]
 
+  postgres-bootstrap:
+    image: postgres:18
+    restart: "no"
+    environment:
+      PGHOST: postgres
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in Portainer}
+      TGSTRM_DATABASE_PASSWORD: ${TGSTRM_DATABASE_PASSWORD:?Set TGSTRM_DATABASE_PASSWORD in Portainer}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        role_exists="$$(psql --dbname postgres --tuples-only --no-align --command "SELECT 1 FROM pg_roles WHERE rolname = 'tgstrm'")"
+        if [ "$$role_exists" != "1" ]; then
+          printf '%s\n' "CREATE ROLE tgstrm LOGIN PASSWORD :'app_password';" \
+            | psql --dbname postgres --set ON_ERROR_STOP=1 --set app_password="$$TGSTRM_DATABASE_PASSWORD"
+        fi
+        printf '%s\n' "ALTER ROLE tgstrm PASSWORD :'app_password';" 'ALTER DATABASE :"app_database" OWNER TO tgstrm;' \
+          | psql --dbname postgres --set ON_ERROR_STOP=1 --set app_password="$$TGSTRM_DATABASE_PASSWORD" --set app_database=tgstrm
+    networks: [database]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    security_opt: ["no-new-privileges:true"]
+
   tgstrm:
-    image: ${TGSTRM_IMAGE:-ghcr.io/REPLACE_WITH_GITHUB_OWNER/tgstrm:latest}
+    image: ${TGSTRM_IMAGE:-ghcr.io/anubisreal/tgstrm:latest}
     container_name: tgstrm
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
@@ -43,6 +65,8 @@ services:
       postgres:
         condition: service_healthy
         restart: true
+      postgres-bootstrap:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "/tgstrm", "healthcheck"]
       interval: 30s

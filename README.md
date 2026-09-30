@@ -50,11 +50,11 @@ PUID=1000
 PGID=1000
 ```
 
-En NPM crea un Proxy Host HTTPS hacia la IP LAN del servidor, por ejemplo `192.168.0.70`, puerto `5151`, con WebSocket activado. Si el puerto del host está ocupado, cambia solo `TGSTRM_PORT` (por ejemplo `5152`) y usa ese puerto en NPM; el puerto interno sigue siendo `5151`. La imagen predeterminada es `ghcr.io/anubisreal/tgstrm:latest`; puedes fijar un tag con `TGSTRM_IMAGE`. Para actualizar una etiqueta `latest` ya desplegada, activa **Re-pull image** al redeplegar en Portainer. Si NPM se ejecuta en Docker, configura `TGSTRM_TRUSTED_PROXY_CIDRS` con la subred real de su contenedor para que TgStrm acepte correctamente `X-Forwarded-Proto`.
+En NPM crea un Proxy Host HTTPS hacia la IP LAN del servidor, por ejemplo `192.168.0.70`, puerto `5151`, con WebSocket activado. No hace falta añadir ninguna red Docker ni configurar un CIDR. Si el puerto del host está ocupado, cambia solo `TGSTRM_PORT` (por ejemplo `5152`) y usa ese puerto en NPM; el puerto interno sigue siendo `5151`. La imagen predeterminada es `ghcr.io/anubisreal/tgstrm:latest`; puedes fijar un tag con `TGSTRM_IMAGE`. Para actualizar una etiqueta `latest` ya desplegada, activa **Re-pull image** al redeplegar en Portainer. `TGSTRM_TRUSTED_PROXY_CIDRS` queda reservado para una topología avanzada con un proxy Docker de red conocida.
 
 > Los tres directorios del host deben existir y pertenecer a `PUID:PGID`. `/data` es el estado de TgStrm; películas y series son bibliotecas independientes. No elimines `/data` al actualizar.
 
-En el primer inicio del panel, conecta con el servidor PostgreSQL `postgres`, base `tgstrm`, usuario `tgstrm` y la contraseña `TGSTRM_DATABASE_PASSWORD`. La plantilla de variables está en [deploy/portainer.env.example](deploy/portainer.env.example). Las plantillas antiguas de `deploy/` siguen disponibles para instalaciones existentes con otra topología.
+En el primer inicio del panel, conecta con el servidor PostgreSQL `postgres`, base `tgstrm`, usuario `tgstrm` y la contraseña `TGSTRM_DATABASE_PASSWORD`. La plantilla de variables está en [deploy/portainer.env.example](deploy/portainer.env.example). Las plantillas de `deploy/` son solo variantes avanzadas para instalaciones existentes; para una instalación nueva usa siempre `compose.yaml`.
 
 ## Releases nativas
 

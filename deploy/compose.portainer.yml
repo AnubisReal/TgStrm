@@ -1,6 +1,8 @@
+# Variante avanzada: PostgreSQL externo y NPM en otra topología.
+# Para instalaciones nuevas usa ../../compose.yaml.
 services:
   tgstrm:
-    image: ${TGSTRM_IMAGE:-ghcr.io/REPLACE_WITH_GITHUB_OWNER/tgstrm:latest}
+    image: ${TGSTRM_IMAGE:-ghcr.io/anubisreal/tgstrm:latest}
     container_name: tgstrm
     restart: unless-stopped
     # The host directories must be writable by this account. Change these two

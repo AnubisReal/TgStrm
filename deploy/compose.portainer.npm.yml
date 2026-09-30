@@ -1,9 +1,9 @@
-# Use this Stack when Nginx Proxy Manager is also a Docker service. Both
+# Advanced variant: use only when Nginx Proxy Manager is also a Docker service. Both
 # containers join the same private network; configure NPM upstream as
 # http://tgstrm:5151 with WebSocket support enabled.
 services:
   tgstrm:
-    image: ${TGSTRM_IMAGE:-ghcr.io/REPLACE_WITH_GITHUB_OWNER/tgstrm:latest}
+    image: ${TGSTRM_IMAGE:-ghcr.io/anubisreal/tgstrm:latest}
     container_name: tgstrm
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"

@@ -8,12 +8,8 @@ services:
       POSTGRES_DB: tgstrm
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in Portainer}
-      TGSTRM_DATABASE_PASSWORD: ${TGSTRM_DATABASE_PASSWORD:?Set TGSTRM_DATABASE_PASSWORD in Portainer}
     volumes:
       - postgres_data:/var/lib/postgresql
-    configs:
-      - source: postgres_init
-        target: /docker-entrypoint-initdb.d/10-tgstrm-app-user.sh
     networks: [database]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
@@ -21,6 +17,33 @@ services:
       timeout: 5s
       retries: 8
       start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+
+  # This one-off job is idempotent: it creates the restricted application role
+  # if needed and ensures its password and database ownership are current.
+  postgres-bootstrap:
+    image: postgres:18
+    restart: "no"
+    environment:
+      PGHOST: postgres
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in Portainer}
+      TGSTRM_DATABASE_PASSWORD: ${TGSTRM_DATABASE_PASSWORD:?Set TGSTRM_DATABASE_PASSWORD in Portainer}
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        role_exists="$$(psql --dbname postgres --tuples-only --no-align --command "SELECT 1 FROM pg_roles WHERE rolname = 'tgstrm'")"
+        if [ "$$role_exists" != "1" ]; then
+          printf '%s\n' "CREATE ROLE tgstrm LOGIN PASSWORD :'app_password';" \
+            | psql --dbname postgres --set ON_ERROR_STOP=1 --set app_password="$$TGSTRM_DATABASE_PASSWORD"
+        fi
+        printf '%s\n' "ALTER ROLE tgstrm PASSWORD :'app_password';" 'ALTER DATABASE :"app_database" OWNER TO tgstrm;' \
+          | psql --dbname postgres --set ON_ERROR_STOP=1 --set app_password="$$TGSTRM_DATABASE_PASSWORD" --set app_database=tgstrm
+    networks: [database]
+    depends_on:
+      postgres:
+        condition: service_healthy
     security_opt:
       - no-new-privileges:true
 
@@ -45,6 +68,8 @@ services:
       postgres:
         condition: service_healthy
         restart: true
+      postgres-bootstrap:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "/tgstrm", "healthcheck"]
       interval: 30s
@@ -62,24 +87,3 @@ networks:
 
 volumes:
   postgres_data:
-
-# Inline config avoids a repository-relative bind mount, which Portainer CE
-# cannot use for Git stacks. PostgreSQL runs it only on an empty data volume.
-configs:
-  postgres_init:
-    content: |
-      #!/bin/sh
-      set -eu
-      : "$${POSTGRES_USER:?POSTGRES_USER is required}"
-      : "$${POSTGRES_DB:?POSTGRES_DB is required}"
-      : "$${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
-      : "$${TGSTRM_DATABASE_PASSWORD:?TGSTRM_DATABASE_PASSWORD is required}"
-      PGPASSWORD="$$POSTGRES_PASSWORD" psql \
-        --username "$$POSTGRES_USER" \
-        --dbname postgres \
-        --set ON_ERROR_STOP=1 \
-        --set app_password="$$TGSTRM_DATABASE_PASSWORD" \
-        --set app_database="$$POSTGRES_DB" <<'SQL'
-      CREATE ROLE tgstrm LOGIN PASSWORD :'app_password';
-      ALTER DATABASE :"app_database" OWNER TO tgstrm;
-      SQL

@@ -40,7 +40,7 @@ RUN apt-get update \
 RUN mkdir -p /data && chown 65532:65532 /data
 LABEL org.opencontainers.image.title="TgStrm" \
       org.opencontainers.image.description="Telegram STRM catalog manager" \
-      org.opencontainers.image.source="https://github.com/REPLACE_WITH_GITHUB_OWNER/tgstrm"
+      org.opencontainers.image.source="https://github.com/AnubisReal/TgStrm"
 COPY --from=go-build /out/tgstrm /tgstrm
 ENV TGSTRM_ADDR=:5151 \
     TGSTRM_ALLOW_REMOTE=1 \
