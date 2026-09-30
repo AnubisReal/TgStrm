@@ -64,3 +64,63 @@
     </td>
   </tr>
 </table>
+
+---
+
+## Instalar
+
+<p align="center">
+  <strong>Portainer es la forma recomendada.</strong><br>
+  <sub>Un Stack, PostgreSQL incluido y tus bibliotecas montadas desde el primer arranque.</sub>
+</p>
+
+### Portainer
+
+1. Crea en tu servidor las carpetas que conservarán la instalación y las bibliotecas:
+
+   ```text
+   /instalaciones/tgstrm/data
+   /extraible2/strm/movies
+   /extraible2/strm/series
+   ```
+
+2. En **Portainer → Stacks → Add stack**, elige **Git Repository** y configura:
+
+   ```text
+   Repository URL: https://github.com/AnubisReal/TgStrm.git
+   Reference: main
+   Compose path: compose.yaml
+   ```
+
+   Si tu copia del repositorio es privada, usa las credenciales de GitHub en Portainer.
+
+3. En las variables del Stack, copia este bloque. Cambia únicamente las dos contraseñas y las rutas si usas otras unidades:
+
+   ```dotenv
+   POSTGRES_PASSWORD=elige-una-contrasena-larga-y-unica
+   TGSTRM_DATABASE_PASSWORD=elige-otra-contrasena-larga-y-unica
+
+   TGSTRM_DATA_DIR_HOST=/instalaciones/tgstrm/data
+   TGSTRM_MOVIES_DIR_HOST=/extraible2/strm/movies
+   TGSTRM_SHOWS_DIR_HOST=/extraible2/strm/series
+   TGSTRM_PORT=5151
+   PUID=1000
+   PGID=1000
+   ```
+
+4. Pulsa **Deploy the stack** y abre `http://IP_DE_TU_SERVIDOR:5151`.
+
+5. En el primer inicio, conecta Telegram y, en el asistente de base de datos, usa:
+
+   ```text
+   Servidor: postgres
+   Base de datos: tgstrm
+   Usuario: tgstrm
+   Contraseña: el valor de TGSTRM_DATABASE_PASSWORD
+   ```
+
+TgStrm crea y mantiene PostgreSQL dentro del Stack. La configuración, la sesión y las copias quedan en `/instalaciones/tgstrm/data`; las bibliotecas STRM permanecen en las dos rutas de películas y series. Para publicar el panel con Nginx Proxy Manager, apunta el Proxy Host a `IP_DE_TU_SERVIDOR:5151` y activa WebSocket.
+
+### Sin Docker
+
+Descarga el binario correspondiente desde [Releases](https://github.com/AnubisReal/TgStrm/releases), crea un directorio persistente y ejecútalo. La guía para macOS, Linux y Windows está en [docs/INSTALACION.md](docs/INSTALACION.md).
