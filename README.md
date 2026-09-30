@@ -9,11 +9,11 @@
 </p>
 
 <p align="center">
-  <img alt="Telegram" src="https://img.shields.io/badge/Telegram-334d39?style=flat-square&logo=telegram&logoColor=white">
-  <img alt="TMDB" src="https://img.shields.io/badge/TMDB-334d39?style=flat-square&logo=themoviedatabase&logoColor=white">
-  <img alt="Go" src="https://img.shields.io/badge/Go-1f1d18?style=flat-square&logo=go&logoColor=white">
-  <img alt="Docker" src="https://img.shields.io/badge/Docker-1f1d18?style=flat-square&logo=docker&logoColor=white">
-  <a href="https://www.instagram.com/anubisreal/"><img alt="Instagram @anubisreal" src="https://img.shields.io/badge/%40anubisreal-E4405F?style=flat-square&logo=instagram&logoColor=white"></a>
+  <img alt="Telegram" src="docs/assets/readme-badge-telegram.svg">
+  <img alt="TMDB" src="docs/assets/readme-badge-tmdb.svg">
+  <img alt="Go" src="docs/assets/readme-badge-go.svg">
+  <img alt="Docker" src="docs/assets/readme-badge-docker.svg">
+  <a href="https://www.instagram.com/anubisreal/"><img alt="Instagram" src="docs/assets/readme-badge-instagram.svg"></a>
 </p>
 
 ---
