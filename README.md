@@ -44,3 +44,23 @@
     </td>
   </tr>
 </table>
+
+<br>
+
+<p align="center">
+  <img src="docs/assets/readme-overview.png" alt="Vista principal del catálogo de TgStrm" width="100%">
+</p>
+
+<table>
+  <tr>
+    <td width="33.33%" align="center">
+      <img src="docs/assets/readme-movies.png" alt="Catálogo de películas" width="100%">
+    </td>
+    <td width="33.33%" align="center">
+      <img src="docs/assets/readme-tmdb-review.png" alt="Revisión de coincidencias TMDB" width="100%">
+    </td>
+    <td width="33.33%" align="center">
+      <img src="docs/assets/readme-player.png" alt="Reproductor y datos de archivo" width="100%">
+    </td>
+  </tr>
+</table>
