@@ -11,7 +11,7 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
-FROM --platform=$BUILDPLATFORM golang:1.26.2-alpine AS go-build
+FROM --platform=$BUILDPLATFORM golang:1.27.0-alpine AS go-build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
