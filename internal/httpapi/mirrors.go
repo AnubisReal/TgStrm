@@ -38,7 +38,7 @@ func (a *API) mirrorLinks(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := a.db.QueryContext(r.Context(), `SELECT ml.id::text,sc.id::text,sc.title,st.id::text,st.title,
 		dc.id::text,dc.title,dt.id::text,dt.title,ml.status,
-		count(md.id) FILTER(WHERE md.status='completed' AND source.is_active AND EXISTS(
+		count(md.id) FILTER(WHERE md.status='completed' AND md.destination_deleted_at IS NULL AND EXISTS(
 			SELECT 1 FROM tgstrm.messages target
 			WHERE target.topic_id=ml.destination_topic_id AND target.is_active
 			AND (target.id=md.destination_message_id OR
@@ -51,6 +51,7 @@ func (a *API) mirrorLinks(w http.ResponseWriter, r *http.Request) {
 		JOIN tgstrm.topics dt ON dt.id=ml.destination_topic_id JOIN tgstrm.chats dc ON dc.id=dt.chat_id
 		LEFT JOIN tgstrm.mirror_deliveries md ON md.link_id=ml.id
 		LEFT JOIN tgstrm.messages source ON source.id=md.source_message_id
+		WHERE ml.retired_at IS NULL
 		GROUP BY ml.id,sc.id,st.id,dc.id,dt.id ORDER BY ml.created_at DESC`)
 	if err != nil {
 		fail(w, 500, "mirror_list_failed", "No se pudieron cargar los vínculos.")
@@ -92,9 +93,10 @@ func (a *API) createMirrorLink(w http.ResponseWriter, r *http.Request) {
 		fail(w, 422, "invalid_history_mode", "Selecciona si quieres copiar el historial existente.")
 		return
 	}
-	var sourceChat, destinationChat, activeChat string
-	err := a.db.QueryRowContext(r.Context(), `SELECT st.chat_id::text,dt.chat_id::text,COALESCE((SELECT value #>> '{}' FROM tgstrm.settings WHERE key='active_chat_id'),'')
-		FROM tgstrm.topics st,tgstrm.topics dt WHERE st.id::text=$1 AND dt.id::text=$2 AND st.is_active AND dt.is_active`, in.SourceTopicID, in.DestinationTopicID).Scan(&sourceChat, &destinationChat, &activeChat)
+	var sourceChat, destinationChat string
+	var destinationManaged bool
+	err := a.db.QueryRowContext(r.Context(), `SELECT st.chat_id::text,dt.chat_id::text,EXISTS(SELECT 1 FROM tgstrm.managed_catalog_chats c WHERE c.id=dt.chat_id AND c.is_active)
+		FROM tgstrm.topics st,tgstrm.topics dt WHERE st.id::text=$1 AND dt.id::text=$2 AND st.is_active AND dt.is_active`, in.SourceTopicID, in.DestinationTopicID).Scan(&sourceChat, &destinationChat, &destinationManaged)
 	if errors.Is(err, sql.ErrNoRows) {
 		fail(w, 404, "topic_not_found", "Alguno de los topics ya no está disponible.")
 		return
@@ -103,8 +105,8 @@ func (a *API) createMirrorLink(w http.ResponseWriter, r *http.Request) {
 		fail(w, 500, "mirror_create_failed", "No se pudo validar el vínculo.")
 		return
 	}
-	if sourceChat == destinationChat || destinationChat != activeChat {
-		fail(w, 422, "invalid_mirror", "El origen debe ser externo y el destino debe pertenecer al grupo principal.")
+	if sourceChat == destinationChat || !destinationManaged {
+		fail(w, 422, "invalid_mirror", "El origen debe ser externo y el destino debe pertenecer a tu biblioteca.")
 		return
 	}
 	var id string
@@ -138,7 +140,7 @@ func (a *API) mirrorLink(w http.ResponseWriter, r *http.Request) {
 			fail(w, 400, "invalid_status", "Estado de espejo no válido.")
 			return
 		}
-		err := a.db.QueryRowContext(r.Context(), `UPDATE tgstrm.mirror_links SET status=$2,last_error=NULL,updated_at=now() WHERE id::text=$1 RETURNING status`, r.PathValue("linkID"), in.Status).Scan(&status)
+		err := a.db.QueryRowContext(r.Context(), `UPDATE tgstrm.mirror_links SET status=$2,last_error=NULL,updated_at=now() WHERE id::text=$1 AND retired_at IS NULL AND ($2<>'active' OR EXISTS(SELECT 1 FROM tgstrm.topics st,tgstrm.topics dt,tgstrm.chats sc,tgstrm.chats dc WHERE st.id=source_topic_id AND dt.id=destination_topic_id AND sc.id=st.chat_id AND dc.id=dt.chat_id AND st.is_active AND dt.is_active AND sc.is_active AND dc.is_active)) RETURNING status`, r.PathValue("linkID"), in.Status).Scan(&status)
 		if errors.Is(err, sql.ErrNoRows) {
 			fail(w, 404, "mirror_not_found", "El vínculo no existe.")
 			return

@@ -35,7 +35,7 @@ func deletedTopicTrees(exports []reconciledExport) map[string]struct{} {
 		root := filepath.Clean(item.rootPath)
 		first := strings.Split(filepath.ToSlash(item.relativePath), "/")[0]
 		tree := filepath.Clean(filepath.Join(root, filepath.FromSlash(first)))
-		if first == "" || first == "." || tree == root || !strings.HasPrefix(tree, root+string(os.PathSeparator)) {
+		if first == "" || first == "." || first == ".tgstrm-recovery" || tree == root || !strings.HasPrefix(tree, root+string(os.PathSeparator)) {
 			continue
 		}
 		shared := false
@@ -60,12 +60,15 @@ func deletedTopicTrees(exports []reconciledExport) map[string]struct{} {
 // A periodic scan is intentional: it also works with Docker bind mounts, NAS
 // volumes and filesystems whose native change notifications are unreliable.
 func (a *API) runExportReconciler(ctx context.Context) {
+	_ = a.processLibraryCleanup(ctx)
 	a.reconcileCompletedCatalogImports(ctx)
 	a.retryEpisodeReplacements(ctx)
 	if err := a.reconcileExports(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("No se pudieron reconciliar los STRM: %v", err)
 	}
+	a.recoverEpisodeDetection(ctx)
 	a.autoGeneratePrimarySTRM(ctx)
+	a.retireExportPaths(ctx)
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -73,12 +76,17 @@ func (a *API) runExportReconciler(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 90*time.Second)
+			_ = a.processLibraryCleanup(cleanupCtx)
+			cleanupCancel()
 			a.reconcileCompletedCatalogImports(ctx)
 			a.retryEpisodeReplacements(ctx)
 			if err := a.reconcileExports(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				log.Printf("No se pudieron reconciliar los STRM: %v", err)
 			}
+			a.recoverEpisodeDetection(ctx)
 			a.autoGeneratePrimarySTRM(ctx)
+			a.retireExportPaths(ctx)
 		}
 	}
 }
@@ -116,6 +124,23 @@ func (a *API) retryEpisodeReplacements(ctx context.Context) {
 	}
 }
 
+// Known destination deletions are terminal, not catalogue gaps. Legacy imports
+// without delivery identities retain their conservative recovery fallback.
+const completedImportRecoverySQL = `SELECT DISTINCT dt.chat_id::text,dt.id::text
+ FROM tgstrm.catalog_imports ci JOIN tgstrm.topics dt ON dt.id=ci.destination_topic_id AND dt.is_active
+ WHERE ci.status='completed' AND ci.requested_count>0 AND (
+ EXISTS(SELECT 1 FROM tgstrm.catalog_import_messages delivered
+  WHERE delivered.import_id=ci.id AND delivered.status='completed' AND delivered.destination_deleted_at IS NULL
+  AND (delivered.destination_message_id IS NOT NULL OR delivered.destination_telegram_message_id IS NOT NULL)
+  AND NOT EXISTS(SELECT 1 FROM tgstrm.messages m WHERE m.topic_id=dt.id
+   AND (m.id=delivered.destination_message_id OR m.telegram_message_id=delivered.destination_telegram_message_id)))
+ OR (EXISTS(SELECT 1 FROM tgstrm.catalog_import_messages legacy WHERE legacy.import_id=ci.id AND legacy.status='completed' AND legacy.destination_deleted_at IS NULL AND legacy.destination_message_id IS NULL AND legacy.destination_telegram_message_id IS NULL)
+  AND (SELECT count(*) FROM tgstrm.messages m WHERE m.topic_id=dt.id AND m.is_active AND m.media_type='video')
+   < (SELECT count(*) FROM tgstrm.catalog_import_messages expected WHERE expected.import_id=ci.id AND expected.status='completed' AND expected.destination_deleted_at IS NULL))
+ OR (NOT EXISTS(SELECT 1 FROM tgstrm.catalog_import_messages ledger WHERE ledger.import_id=ci.id AND ledger.status='completed')
+  AND (SELECT count(*) FROM tgstrm.messages m WHERE m.topic_id=dt.id AND m.is_active AND m.media_type='video')<ci.requested_count)
+ ) ORDER BY dt.id::text LIMIT 2`
+
 // reconcileCompletedCatalogImports closes the durable gap between Telegram
 // accepting a batch and its destination topic becoming fully searchable. This
 // also repairs imports completed by an older server version after a restart.
@@ -127,11 +152,7 @@ func (a *API) reconcileCompletedCatalogImports(ctx context.Context) {
 		FROM tgstrm.catalog_imports ci
 		WHERE ci.destination_topic_id=t.id AND ci.status='completed' AND t.is_active
 		AND t.library_kind='unclassified'`)
-	rows, err := a.db.QueryContext(ctx, `SELECT DISTINCT dt.chat_id::text,dt.id::text
-		FROM tgstrm.catalog_imports ci JOIN tgstrm.topics dt ON dt.id=ci.destination_topic_id AND dt.is_active
-		WHERE ci.status='completed' AND ci.requested_count>0 AND
-		 (SELECT count(*) FROM tgstrm.messages m WHERE m.topic_id=dt.id AND m.is_active AND m.media_type='video') < ci.requested_count
-		ORDER BY dt.id::text LIMIT 2`)
+	rows, err := a.db.QueryContext(ctx, completedImportRecoverySQL)
 	if err != nil {
 		return
 	}
@@ -158,13 +179,12 @@ func (a *API) reconcileCompletedCatalogImports(ctx context.Context) {
 
 func (a *API) autoGeneratePrimarySTRM(ctx context.Context) {
 	rows, err := a.db.QueryContext(ctx, `SELECT DISTINCT c.id::text,t.id::text
-	 FROM tgstrm.settings active
-	 JOIN tgstrm.chats c ON c.id::text=(active.value #>> '{}') AND c.is_active
+	 FROM tgstrm.managed_catalog_chats c
 	 JOIN tgstrm.topics t ON t.chat_id=c.id AND t.is_active AND t.library_kind IN ('movie_collection','series')
 	 JOIN tgstrm.messages m ON m.topic_id=t.id AND m.is_active AND m.media_type='video'
 	 JOIN tgstrm.stream_assets sa ON sa.message_id=m.id
 	 JOIN tgstrm.settings started ON started.key='auto_export_started_at'
-	 WHERE active.key='active_chat_id' AND (sa.created_at >= (started.value #>> '{}')::timestamptz
+	 WHERE c.is_active AND NOT EXISTS(SELECT 1 FROM tgstrm.settings paused WHERE paused.key='strm_cleanup_paused_groups' AND paused.value @> jsonb_build_object(c.id::text,true)) AND (sa.created_at >= (started.value #>> '{}')::timestamptz
 	   OR EXISTS(SELECT 1 FROM tgstrm.stream_exports existing WHERE existing.asset_id=sa.id)
 	   OR EXISTS(SELECT 1 FROM tgstrm.tmdb_matches matched WHERE matched.message_id=m.id AND matched.media_type='movie'))
 	 AND (
@@ -199,7 +219,7 @@ func (a *API) autoGeneratePrimarySTRM(ctx context.Context) {
 // action. Calling it explicitly after an import avoids waiting for the periodic
 // reconciler and guarantees that it sees the fully indexed destination topic.
 func (a *API) generateAutomaticTopicSTRM(ctx context.Context, groupID, topicID string) int {
-	return a.generateSelectedTopicSTRM(ctx, groupID, topicID, "")
+	return a.generateSelectedTopicSTRM(context.WithValue(ctx, cleanupAutomaticKey{}, true), groupID, topicID, "")
 }
 
 func (a *API) generateSelectedTopicSTRM(ctx context.Context, groupID, topicID, messageID string) int {
@@ -217,6 +237,8 @@ func (a *API) generateSelectedTopicSTRM(ctx context.Context, groupID, topicID, m
 }
 
 func (a *API) reconcileExports(ctx context.Context) error {
+	ctx, unlock := a.lockExportLibrary(ctx)
+	defer unlock()
 	rows, err := a.db.QueryContext(ctx, `SELECT e.id::text,lt.root_path,e.relative_path,e.status,e.content_hash,
 	 sa.id::text,lt.public_base_url,t.id::text,c.id::text,m.is_active,t.is_active,c.is_active
 	 FROM tgstrm.stream_exports e

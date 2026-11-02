@@ -155,11 +155,11 @@ func (s *Service) RefreshTopics(ctx context.Context, groupID string) error {
 		 is_closed,is_hidden,is_pinned,unread_count,unread_mentions_count,top_message_id,telegram_created_at,last_message_at,is_active,
 		 library_kind,classification_source,classified_at)
 		 VALUES($1::bigint,$2,$3,$4,NULLIF($5::bigint,0),$6,$7,$8,$9,$10,$11,$12,NULLIF($13,'0001-01-01 00:00:00+00'::timestamptz),true,
-		 CASE WHEN EXISTS(SELECT 1 FROM tgstrm.settings s WHERE s.key='active_chat_id' AND (s.value #>> '{}')=$1::bigint::text)
+		 CASE WHEN EXISTS(SELECT 1 FROM tgstrm.managed_catalog_chats mc WHERE mc.id=$1::bigint)
 		   THEN CASE WHEN lower(trim($3)) IN ('peliculas','películas','movies','films') THEN 'movie_collection'
 		             WHEN lower(trim($3))='general' THEN 'ignored' ELSE 'series' END
 		   ELSE 'unclassified' END,
-		 'automatic',CASE WHEN EXISTS(SELECT 1 FROM tgstrm.settings s WHERE s.key='active_chat_id' AND (s.value #>> '{}')=$1::bigint::text) THEN now() END)
+		 'automatic',CASE WHEN EXISTS(SELECT 1 FROM tgstrm.managed_catalog_chats mc WHERE mc.id=$1::bigint) THEN now() END)
 		 ON CONFLICT(chat_id,telegram_topic_id) DO UPDATE SET title=EXCLUDED.title,icon_color=EXCLUDED.icon_color,
 		 icon_emoji_id=EXCLUDED.icon_emoji_id,is_closed=EXCLUDED.is_closed,is_hidden=EXCLUDED.is_hidden,
 		 is_pinned=EXCLUDED.is_pinned,unread_count=EXCLUDED.unread_count,unread_mentions_count=EXCLUDED.unread_mentions_count,

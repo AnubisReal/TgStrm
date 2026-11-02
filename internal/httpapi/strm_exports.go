@@ -29,6 +29,7 @@ type exportCandidate struct {
 	OverrideTitle                         string
 	MovieTitle, MovieYear                 string
 	MovieTMDBID                           int64
+	MonitoredMovie                        bool
 	SentAt                                time.Time
 }
 
@@ -63,6 +64,24 @@ func movieSTRMPath(title, year string) (string, bool) {
 	}
 	label := safeLibraryName(fmt.Sprintf("%s (%s)", title, year), "Película")
 	return filepath.Join(label, label+".strm"), true
+}
+
+// Jellyfin groups versions only when each filename starts with the exact folder
+// name. The persistent asset ID distinguishes versions even with equal labels.
+func movieProfileSTRMPath(profile, title, year string, tmdbID int64, assetID string, includeTMDBID bool) (string, bool) {
+	relative, ok := movieSTRMPath(title, year)
+	if !ok || profile != "jellyfin_tmdb" {
+		return relative, ok
+	}
+	if (includeTMDBID && tmdbID <= 0) || assetID == "" {
+		return "", false
+	}
+	label := filepath.Base(filepath.Dir(relative))
+	if includeTMDBID {
+		label += fmt.Sprintf(" [tmdbid-%d]", tmdbID)
+	}
+	version := safeLibraryName(assetID, "archivo")
+	return filepath.Join(label, label+" - Version "+version+".strm"), true
 }
 
 func shouldReplaceEpisode(startedAt, incomingAt time.Time, incomingID, existingID int) bool {
@@ -115,6 +134,8 @@ func removeExportDirectoryMetadata(dir string) {
 }
 
 func (a *API) removeStaleAssetExports(ctx context.Context, assetID, mediaType string) {
+	ctx, unlock := a.lockExportLibrary(ctx)
+	defer unlock()
 	rows, err := a.db.QueryContext(ctx, `SELECT e.id::text,lt.root_path,e.relative_path
 	 FROM tgstrm.stream_exports e JOIN tgstrm.library_targets lt ON lt.id=e.library_id
 	 WHERE e.asset_id=$1 AND lt.media_type<>$2`, assetID, mediaType)
@@ -150,6 +171,8 @@ func (a *API) removeStaleAssetExports(ctx context.Context, assetID, mediaType st
 // can no longer be named safely. The filesystem is changed before its durable
 // row is removed, so a failed removal remains visible and can be retried.
 func (a *API) removeAssetExportsForMediaType(ctx context.Context, assetID, mediaType string) {
+	ctx, unlock := a.lockExportLibrary(ctx)
+	defer unlock()
 	rows, err := a.db.QueryContext(ctx, `SELECT e.id::text,lt.root_path,e.relative_path
 	 FROM tgstrm.stream_exports e JOIN tgstrm.library_targets lt ON lt.id=e.library_id
 	 WHERE e.asset_id=$1 AND lt.media_type=$2`, assetID, mediaType)
@@ -249,6 +272,26 @@ func (a *API) completeEpisodeReplacement(ctx context.Context, replacementID, top
 }
 
 func (a *API) generateTopicSTRM(w http.ResponseWriter, r *http.Request) {
+	ctx, unlock := a.lockExportLibrary(r.Context())
+	defer unlock()
+	r = r.WithContext(ctx)
+	if a.db != nil {
+		var active, paused bool
+		err := a.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tgstrm.library_cleanup_jobs WHERE status IN ('pending','running')), COALESCE((SELECT (value->>$1)::boolean FROM tgstrm.settings WHERE key='strm_cleanup_paused_groups'),false)`, r.PathValue("groupID")).Scan(&active, &paused)
+		if err != nil {
+			fail(w, 503, "cleanup_state_unavailable", "No se pudo comprobar el estado de biblioteca.")
+			return
+		}
+		if (active || paused) && ctx.Value(cleanupAutomaticKey{}) == true {
+			writeJSON(w, 202, map[string]any{"status": "paused", "written": 0})
+			return
+		}
+		if active {
+			fail(w, 409, "library_paused", "La generación está pausada por la limpieza de biblioteca.")
+			return
+		}
+	}
+
 	if a.db == nil {
 		fail(w, 503, "database_unavailable", "La base de datos no está disponible.")
 		return
@@ -331,9 +374,10 @@ func (a *API) generateTopicSTRM(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := a.db.QueryContext(r.Context(), `SELECT m.id::text,sa.id::text,COALESCE(mm.file_name,''),COALESCE(m.body,''),m.telegram_message_id,
 	 COALESCE(eo.season_number,0),COALESCE(eo.episode_number,0),COALESCE(eo.episode_title,''),
-	 COALESCE(tm.title,''),COALESCE(to_char(tm.release_date,'YYYY'),''),COALESCE(tm.tmdb_id,0),m.sent_at
+	 COALESCE(tm.title,''),COALESCE(to_char(tm.release_date,'YYYY'),''),COALESCE(tm.tmdb_id,0),m.sent_at,EXISTS(SELECT 1 FROM tgstrm.movie_monitor_deliveries d WHERE d.destination_message_id=m.id)
 	 FROM tgstrm.messages m JOIN tgstrm.stream_assets sa ON sa.message_id=m.id JOIN tgstrm.message_media mm ON mm.message_id=m.id
 	 LEFT JOIN tgstrm.stream_episode_overrides eo ON eo.asset_id=sa.id
+ AND EXISTS(SELECT 1 FROM tgstrm.tmdb_matches series WHERE series.topic_id=m.topic_id AND series.message_id IS NULL AND series.tmdb_id=eo.series_tmdb_id)
 	 LEFT JOIN tgstrm.tmdb_matches tm ON tm.message_id=m.id AND tm.media_type='movie'
 	 WHERE m.topic_id::text=$1 AND m.is_active AND m.media_type='video' ORDER BY m.telegram_message_id`, r.PathValue("topicID"))
 	if err != nil {
@@ -346,7 +390,7 @@ func (a *API) generateTopicSTRM(w http.ResponseWriter, r *http.Request) {
 		var item exportCandidate
 		if err = rows.Scan(&item.MessageID, &item.AssetID, &item.FileName, &item.Caption, &item.TelegramID,
 			&item.OverrideSeason, &item.OverrideEpisode, &item.OverrideTitle,
-			&item.MovieTitle, &item.MovieYear, &item.MovieTMDBID, &item.SentAt); err != nil {
+			&item.MovieTitle, &item.MovieYear, &item.MovieTMDBID, &item.SentAt, &item.MonitoredMovie); err != nil {
 			fail(w, 500, "videos_failed", "No se pudieron preparar los vídeos.")
 			return
 		}
@@ -388,6 +432,10 @@ func (a *API) generateTopicSTRM(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	written, unresolved := 0, 0
+	var correctingIdentity bool
+	if err := a.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM tgstrm.topic_identity_jobs WHERE topic_id::text=$1 AND status<>'completed')`, r.PathValue("topicID")).Scan(&correctingIdentity); err != nil {
+		correctingIdentity = true
+	}
 	var replacementStartedAt time.Time
 	var replacementRaw []byte
 	if err := a.db.QueryRowContext(r.Context(), `SELECT value FROM tgstrm.settings WHERE key='episode_replacement_started_at'`).Scan(&replacementRaw); err == nil {
@@ -403,7 +451,7 @@ func (a *API) generateTopicSTRM(w http.ResponseWriter, r *http.Request) {
 			if item.OverrideEpisode > 0 {
 				episode, ok = episodeIdentity{Season: item.OverrideSeason, Episode: item.OverrideEpisode, Source: "manual"}, true
 			} else {
-				episode, ok = detectEpisode(item.FileName, item.Caption)
+				episode, ok = a.detectSeriesEpisode(r.Context(), seriesTMDBID, item.FileName, item.Caption)
 			}
 			if !ok {
 				unresolved++
@@ -412,13 +460,19 @@ func (a *API) generateTopicSTRM(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			episodeTitle := item.OverrideTitle
-			if episodeTitle == "" {
+			if episode.EndEpisode > episode.Episode {
+				episodeTitle = fmt.Sprintf("Episodios %02d-%02d", episode.Episode, episode.EndEpisode)
+			} else if episodeTitle == "" {
 				episodeTitle = a.tmdbEpisodeTitle(r.Context(), seriesTMDBID, episode.Season, episode.Episode)
 			}
-			relative = seriesSTRMPath(settings.SeriesNaming, seriesTitle, seriesYear, seriesTMDBID, episode, episodeTitle)
+			relative = seriesSTRMPath(settings.SeriesNaming, seriesTitle, seriesYear, seriesTMDBID, episode, episodeTitle, settings.IncludeTMDBID)
 		} else {
 			var ok bool
-			relative, ok = movieSTRMPath(item.MovieTitle, item.MovieYear)
+			profile := settings.SeriesNaming
+			if item.MonitoredMovie {
+				profile = "jellyfin_tmdb"
+			}
+			relative, ok = movieProfileSTRMPath(profile, item.MovieTitle, item.MovieYear, item.MovieTMDBID, item.AssetID, settings.IncludeTMDBID)
 			if !ok || item.MovieTMDBID <= 0 {
 				unresolved++
 				a.removeAssetExportsForMediaType(r.Context(), item.AssetID, "movies")
@@ -438,7 +492,7 @@ func (a *API) generateTopicSTRM(w http.ResponseWriter, r *http.Request) {
 				WHERE e.library_id=$1 AND e.relative_path=$2 AND e.asset_id<>$3`, libraryID, filepath.ToSlash(relative), item.AssetID).
 				Scan(&existingExportID, &existingAssetID, &existingMessageID, &existingTelegramID)
 			if err == nil {
-				if !shouldReplaceEpisode(replacementStartedAt, item.SentAt, item.TelegramID, existingTelegramID) {
+				if correctingIdentity || !shouldReplaceEpisode(replacementStartedAt, item.SentAt, item.TelegramID, existingTelegramID) {
 					unresolved++
 					_, _ = a.db.ExecContext(r.Context(), `UPDATE tgstrm.stream_assets SET processed_signature=source_signature,processed_at=now(),
 						last_export_error='Este episodio ya tiene un STRM generado. La sustitución automática solo se aplica a archivos nuevos.',updated_at=now() WHERE id=$1`, item.AssetID)
@@ -474,11 +528,27 @@ func (a *API) generateTopicSTRM(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 		}
-		var previousRelative sql.NullString
-		_ = a.db.QueryRowContext(r.Context(), `SELECT relative_path FROM tgstrm.stream_exports WHERE library_id=$1 AND asset_id=$2`, libraryID, item.AssetID).Scan(&previousRelative)
 		var exportID string
-		err = a.db.QueryRowContext(r.Context(), `INSERT INTO tgstrm.stream_exports(library_id,asset_id,relative_path,content_hash,status) VALUES($1,$2,$3,$4,'pending')
+		reservation, reserveErr := a.db.BeginTx(r.Context(), nil)
+		if reserveErr != nil {
+			_, _ = a.db.ExecContext(r.Context(), `UPDATE tgstrm.stream_assets SET last_export_error=$2,updated_at=now() WHERE id=$1`, item.AssetID, fmt.Sprintf("No se pudo iniciar la reserva STRM: %.400s", reserveErr.Error()))
+			continue
+		}
+		_, reserveErr = reservation.ExecContext(r.Context(), `INSERT INTO tgstrm.retired_export_paths(library_id,asset_id,relative_path,content_hash)
+ SELECT library_id,asset_id,relative_path,content_hash FROM tgstrm.stream_exports WHERE library_id=$1 AND asset_id=$2 AND relative_path<>$3
+ ON CONFLICT(library_id,asset_id,relative_path) DO UPDATE SET content_hash=EXCLUDED.content_hash`, libraryID, item.AssetID, filepath.ToSlash(relative))
+		if reserveErr != nil {
+			reservation.Rollback()
+			_, _ = a.db.ExecContext(r.Context(), `UPDATE tgstrm.stream_assets SET last_export_error=$2,updated_at=now() WHERE id=$1`, item.AssetID, fmt.Sprintf("No se pudo conservar la ruta anterior: %.400s", reserveErr.Error()))
+			continue
+		}
+		err = reservation.QueryRowContext(r.Context(), `INSERT INTO tgstrm.stream_exports(library_id,asset_id,relative_path,content_hash,status) VALUES($1,$2,$3,$4,'pending')
 		 ON CONFLICT(library_id,asset_id) DO UPDATE SET relative_path=EXCLUDED.relative_path,content_hash=EXCLUDED.content_hash,status='pending',last_error=NULL,updated_at=now() RETURNING id::text`, libraryID, item.AssetID, filepath.ToSlash(relative), hash[:]).Scan(&exportID)
+		if err == nil {
+			err = reservation.Commit()
+		} else {
+			reservation.Rollback()
+		}
 		if err != nil {
 			_, _ = a.db.ExecContext(r.Context(), `UPDATE tgstrm.stream_assets SET processed_at=now(),last_export_error=$2,updated_at=now() WHERE id=$1`,
 				item.AssetID, fmt.Sprintf("No se pudo reservar la ruta STRM: %.400s", err.Error()))
@@ -490,15 +560,22 @@ func (a *API) generateTopicSTRM(w http.ResponseWriter, r *http.Request) {
 				item.AssetID, fmt.Sprintf("No se pudo escribir el STRM: %.400s", err.Error()))
 			continue
 		}
-		_, _ = a.db.ExecContext(r.Context(), `UPDATE tgstrm.stream_exports SET status='written',written_at=now(),last_error=NULL,updated_at=now() WHERE id=$1`, exportID)
-		_, _ = a.db.ExecContext(r.Context(), `UPDATE tgstrm.stream_assets SET processed_signature=source_signature,
-			processed_at=now(),last_export_error=NULL,updated_at=now() WHERE id=$1`, item.AssetID)
-		if previousRelative.Valid && previousRelative.String != filepath.ToSlash(relative) {
-			oldPath := filepath.Join(rootPath, filepath.FromSlash(previousRelative.String))
-			if removeErr := os.Remove(oldPath); removeErr == nil || errors.Is(removeErr, os.ErrNotExist) {
-				removeEmptyExportParents(oldPath, rootPath)
-			}
+		finalized, finalErr := a.db.BeginTx(r.Context(), nil)
+		if finalErr != nil {
+			continue
 		}
+		_, finalErr = finalized.ExecContext(r.Context(), `UPDATE tgstrm.stream_exports SET status='written',written_at=now(),last_error=NULL,updated_at=now() WHERE id=$1`, exportID)
+		if finalErr == nil {
+			_, finalErr = finalized.ExecContext(r.Context(), `UPDATE tgstrm.stream_assets SET processed_signature=source_signature,processed_at=now(),last_export_error=NULL,updated_at=now() WHERE id=$1`, item.AssetID)
+		}
+		if finalErr != nil {
+			finalized.Rollback()
+			continue
+		}
+		if finalErr = finalized.Commit(); finalErr != nil {
+			continue
+		}
+
 		a.removeStaleAssetExports(r.Context(), item.AssetID, mediaType)
 		written++
 	}

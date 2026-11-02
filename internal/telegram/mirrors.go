@@ -12,6 +12,16 @@ import (
 	"github.com/gotd/td/tgerr"
 )
 
+const mirrorDeliverySourceSQL = `SELECT ml.id::text,m.id::text,sc.id::text,st.id::text,
+			m.telegram_message_id,sc.telegram_peer_id,COALESCE(sc.access_hash,0),st.telegram_topic_id,
+			dc.telegram_peer_id,COALESCE(dc.access_hash,0),dt.telegram_topic_id,dt.id::text,
+			mm.telegram_file_id,mm.access_hash,mm.file_reference,COALESCE(mm.telegram_dc_id,0),COALESCE(mm.file_name,''),COALESCE(m.body,''),md.random_id
+			FROM tgstrm.mirror_deliveries md JOIN tgstrm.mirror_links ml ON ml.id=md.link_id
+			JOIN tgstrm.messages m ON m.id=md.source_message_id AND m.topic_id=ml.source_topic_id JOIN tgstrm.message_media mm ON mm.message_id=m.id
+			JOIN tgstrm.topics st ON st.id=ml.source_topic_id JOIN tgstrm.chats sc ON sc.id=st.chat_id
+			JOIN tgstrm.topics dt ON dt.id=ml.destination_topic_id JOIN tgstrm.chats dc ON dc.id=dt.chat_id
+			WHERE md.id=$1::uuid AND ml.status='active'`
+
 var mirrorWorkerMu sync.Mutex
 
 // RecoverMirrorSources closes the only gap that realtime updates cannot cover:
@@ -122,12 +132,7 @@ func (s *Service) QueueMirrorEdit(ctx context.Context, channelID int64, topicTel
 		WHERE md.link_id=ml.id AND source_chat.telegram_peer_id=$1 AND source_topic.telegram_topic_id=$2
 		AND source.id=md.source_message_id AND source.telegram_message_id=$3
 		AND md.destination_telegram_message_id IS NULL`, channelID, topicTelegramID, messageTelegramID)
-	result, err := s.DB.ExecContext(ctx, `UPDATE tgstrm.mirror_deliveries md SET desired_caption=$4,edit_status='pending',
-		source_edited_at=now(),edit_next_attempt_at=now(),edit_last_error=NULL,updated_at=now()
-		FROM tgstrm.mirror_links ml JOIN tgstrm.topics t ON t.id=ml.source_topic_id
-		JOIN tgstrm.chats c ON c.id=t.chat_id JOIN tgstrm.messages m ON m.id=md.source_message_id
-		WHERE md.link_id=ml.id AND ml.status='active' AND c.telegram_peer_id=$1 AND t.telegram_topic_id=$2
-		AND m.telegram_message_id=$3`, channelID, topicTelegramID, messageTelegramID, caption)
+	result, err := s.DB.ExecContext(ctx, queueMirrorCaptionEditSQL, channelID, topicTelegramID, messageTelegramID, caption)
 	if err != nil {
 		return err
 	}
@@ -184,14 +189,15 @@ func (s *Service) ProcessMirrorDeliveries(ctx context.Context) {
 			SELECT md.id FROM tgstrm.mirror_deliveries md
 			JOIN tgstrm.mirror_links ml ON ml.id=md.link_id
 			JOIN tgstrm.messages source ON source.id=md.source_message_id
-			WHERE ml.status='active' AND md.next_attempt_at<=now()
+			WHERE ml.status='active' AND md.next_attempt_at<=now() AND md.destination_deleted_at IS NULL
+ AND NOT EXISTS(SELECT 1 FROM tgstrm.topic_replication_manifests mf WHERE mf.source_topic_id=ml.source_topic_id AND (mf.status<>'eligible' OR mf.invalidated_at IS NOT NULL))
 			AND (md.status IN ('pending','failed') OR (md.status='sending' AND md.delivery_lease_expires_at<=now()))
 			-- Keep every link's Telegram history ordered from oldest to newest,
 			-- including when two server instances claim work concurrently.
 			AND NOT EXISTS (
 				SELECT 1 FROM tgstrm.mirror_deliveries earlier
 				JOIN tgstrm.messages earlier_source ON earlier_source.id=earlier.source_message_id
-				WHERE earlier.link_id=md.link_id AND earlier.status<>'completed'
+				WHERE earlier.link_id=md.link_id AND earlier.status<>'completed' AND earlier.destination_deleted_at IS NULL
 				AND earlier_source.telegram_message_id<source.telegram_message_id
 			)
 			ORDER BY md.link_id,source.telegram_message_id,md.id FOR UPDATE OF md SKIP LOCKED LIMIT 1
@@ -205,15 +211,7 @@ func (s *Service) ProcessMirrorDeliveries(ctx context.Context) {
 		if err != nil {
 			return
 		}
-		err = s.DB.QueryRowContext(ctx, `SELECT ml.id::text,m.id::text,sc.id::text,st.id::text,
-			m.telegram_message_id,sc.telegram_peer_id,COALESCE(sc.access_hash,0),st.telegram_topic_id,
-			dc.telegram_peer_id,COALESCE(dc.access_hash,0),dt.telegram_topic_id,dt.id::text,
-			mm.telegram_file_id,mm.access_hash,mm.file_reference,COALESCE(mm.telegram_dc_id,0),COALESCE(mm.file_name,''),COALESCE(m.body,''),md.random_id
-			FROM tgstrm.mirror_deliveries md JOIN tgstrm.mirror_links ml ON ml.id=md.link_id
-			JOIN tgstrm.messages m ON m.id=md.source_message_id JOIN tgstrm.message_media mm ON mm.message_id=m.id
-			JOIN tgstrm.topics st ON st.id=ml.source_topic_id JOIN tgstrm.chats sc ON sc.id=st.chat_id
-			JOIN tgstrm.topics dt ON dt.id=ml.destination_topic_id JOIN tgstrm.chats dc ON dc.id=dt.chat_id
-			WHERE md.id=$1::uuid AND ml.status='active'`, deliveryID).Scan(&linkID, &sourceMessageID, &sourceGroupID, &sourceTopicID, &sourceTelegramID, &sourceChannelID, &sourceHash, &sourceTopicTelegramID, &destinationChannelID, &destinationHash, &destinationTopicTelegramID, &destinationTopicID, &documentID, &documentHash, &fileReference, &dcID, &fileName, &caption, &randomID)
+		err = s.DB.QueryRowContext(ctx, mirrorDeliverySourceSQL, deliveryID).Scan(&linkID, &sourceMessageID, &sourceGroupID, &sourceTopicID, &sourceTelegramID, &sourceChannelID, &sourceHash, &sourceTopicTelegramID, &destinationChannelID, &destinationHash, &destinationTopicTelegramID, &destinationTopicID, &documentID, &documentHash, &fileReference, &dcID, &fileName, &caption, &randomID)
 		if err != nil {
 			return
 		}
@@ -247,10 +245,11 @@ func (s *Service) ProcessMirrorDeliveries(ctx context.Context) {
 			continue
 		}
 		result, updateErr := s.DB.ExecContext(ctx, `UPDATE tgstrm.mirror_deliveries md SET status='completed',
-			destination_telegram_message_id=NULLIF($2,0),last_error=NULL,completed_at=now(),
+			destination_telegram_message_id=NULLIF($2,0),last_error=NULL,completed_at=now(),last_applied_caption=$4,
 			source_edited_at=(SELECT COALESCE(m.edited_at,m.sent_at) FROM tgstrm.messages m WHERE m.id=md.source_message_id),
+            source_caption_snapshot=$4,
 			delivery_lease_token=NULL,delivery_lease_expires_at=NULL,updated_at=now()
-			WHERE md.id=$1 AND md.delivery_lease_token=$3::uuid`, deliveryID, destinationTelegramID, deliveryLease)
+			WHERE md.id=$1 AND md.delivery_lease_token=$3::uuid`, deliveryID, destinationTelegramID, deliveryLease, caption)
 		if updateErr != nil {
 			return
 		}
@@ -269,7 +268,7 @@ func (s *Service) reconcileMirrorExistingDestinations(ctx context.Context) {
 	_, _ = s.DB.ExecContext(ctx, `UPDATE tgstrm.mirror_deliveries md SET
 		status='completed',destination_message_id=target.id,destination_telegram_message_id=target.telegram_message_id,
 		last_error=NULL,completed_at=COALESCE(md.completed_at,now()),
-		source_edited_at=COALESCE(source.edited_at,source.sent_at),desired_caption=NULL,edit_status='idle',edit_last_error=NULL,
+		source_edited_at=COALESCE(source.edited_at,source.sent_at),source_caption_snapshot=COALESCE(source.body,''),desired_caption=NULL,edit_status='idle',edit_last_error=NULL,
 		delivery_lease_token=NULL,delivery_lease_expires_at=NULL,updated_at=now()
 	FROM tgstrm.mirror_links ml
 	JOIN tgstrm.messages source ON source.topic_id=ml.source_topic_id AND source.is_active
@@ -328,7 +327,7 @@ func (s *Service) prepareMirrorHistory(ctx context.Context) {
 	if _, err = tx.ExecContext(leaseCtx, `UPDATE tgstrm.mirror_deliveries md SET
 		status='completed',destination_message_id=target.id,destination_telegram_message_id=target.telegram_message_id,
 		last_error=NULL,completed_at=COALESCE(md.completed_at,now()),
-		source_edited_at=COALESCE(source.edited_at,source.sent_at),desired_caption=NULL,edit_status='idle',edit_last_error=NULL,
+		source_edited_at=COALESCE(source.edited_at,source.sent_at),source_caption_snapshot=COALESCE(source.body,''),desired_caption=NULL,edit_status='idle',edit_last_error=NULL,
 		delivery_lease_token=NULL,delivery_lease_expires_at=NULL,updated_at=now()
 	FROM tgstrm.mirror_links ml
 	JOIN tgstrm.messages source ON source.topic_id=ml.source_topic_id AND source.is_active
@@ -418,7 +417,7 @@ func (s *Service) publishMirrorHistoryProgress(ctx context.Context, linkID, topi
 
 // reconcileMirrorEditState repairs the association for deliveries created by
 // older versions and closes edit gaps caused by downtime. The source caption
-// is authoritative for an active mirror.
+// is compared with its own baseline; a normalized destination is not an edit.
 func (s *Service) reconcileMirrorEditState(ctx context.Context) {
 	// Prefer the exact Telegram message ID returned by messages.sendMedia. This
 	// remains unambiguous when the same document was mirrored more than once.
@@ -439,14 +438,7 @@ func (s *Service) reconcileMirrorEditState(ctx context.Context) {
 			ORDER BY target.telegram_message_id DESC LIMIT 1) candidate ON true
 		WHERE md.link_id=ml.id AND source.id=md.source_message_id AND ml.status='active' AND md.status='completed'
 		AND md.destination_telegram_message_id IS NULL`)
-	_, _ = s.DB.ExecContext(ctx, `UPDATE tgstrm.mirror_deliveries md SET desired_caption=source.body,
-		edit_status='pending',source_edited_at=COALESCE(source.edited_at,source.sent_at),
-		edit_next_attempt_at=now(),edit_last_error=NULL,updated_at=now()
-		FROM tgstrm.mirror_links ml,tgstrm.messages source,tgstrm.messages target
-		WHERE md.link_id=ml.id AND source.id=md.source_message_id AND target.id=md.destination_message_id
-		AND ml.status='active' AND md.status='completed' AND md.edit_status='idle'
-		AND source.body IS DISTINCT FROM target.body
-		AND (md.source_edited_at IS NULL OR COALESCE(source.edited_at,source.sent_at)>md.source_edited_at)`)
+	_, _ = s.DB.ExecContext(ctx, reconcileMirrorCaptionEditSQL)
 }
 
 func messageIDFromUpdates(value tg.UpdatesClass, randomID int64) int {
@@ -483,8 +475,9 @@ func (s *Service) processMirrorEdits(ctx context.Context) {
 		var topicTelegramID, messageTelegramID int
 		err := s.DB.QueryRowContext(ctx, `WITH candidate AS (
 			SELECT md.id FROM tgstrm.mirror_deliveries md JOIN tgstrm.mirror_links ml ON ml.id=md.link_id
-			WHERE ml.status='active' AND md.status='completed'
-			AND md.destination_telegram_message_id IS NOT NULL AND md.edit_next_attempt_at<=now()
+			WHERE ml.status='active' AND md.status='completed' AND md.destination_deleted_at IS NULL AND NOT md.edit_conflict
+			AND NOT EXISTS(SELECT 1 FROM tgstrm.topic_identity_jobs j WHERE j.topic_id=ml.destination_topic_id AND j.status<>'completed')
+            AND md.destination_telegram_message_id IS NOT NULL AND md.edit_next_attempt_at<=now()
 			AND (md.edit_lease_token IS NULL OR md.edit_lease_expires_at<=now())
 			AND (md.edit_status IN ('pending','failed') OR (md.edit_status='editing' AND md.edit_lease_expires_at<=now()))
 			ORDER BY md.source_edited_at,md.updated_at FOR UPDATE OF md SKIP LOCKED LIMIT 1
@@ -505,47 +498,111 @@ func (s *Service) processMirrorEdits(ctx context.Context) {
 		if err != nil {
 			return
 		}
-		s.apiMu.RLock()
-		api := s.runtimeAPI
-		s.apiMu.RUnlock()
-		if api == nil {
-			s.failMirrorEdit(ctx, deliveryID, linkID, editLease, caption, errors.New("Telegram se está reconectando"))
-			return
-		}
-		request := &tg.MessagesEditMessageRequest{Peer: &tg.InputPeerChannel{ChannelID: channelID, AccessHash: accessHash}, ID: messageTelegramID}
-		request.SetMessage(caption)
-		_, editErr := api.MessagesEditMessage(ctx, request)
-		if editErr != nil && !tgerr.Is(editErr, "MESSAGE_NOT_MODIFIED") {
-			s.failMirrorEdit(ctx, deliveryID, linkID, editLease, caption, editErr)
-			continue
-		}
-		result, updateErr := s.DB.ExecContext(ctx, `UPDATE tgstrm.mirror_deliveries SET
+		stop := func() bool {
+			conn, lockErr := s.DB.Conn(ctx)
+			if lockErr != nil {
+				return true
+			}
+			defer conn.Close()
+			var locked bool
+			if lockErr = conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock(hashtextextended('topic-identity:' || $1,0))`, destinationTopicID).Scan(&locked); lockErr != nil {
+				return true
+			}
+			if !locked {
+				_, _ = s.DB.ExecContext(ctx, `UPDATE tgstrm.mirror_deliveries SET edit_status='pending',edit_lease_token=NULL,edit_lease_expires_at=NULL,edit_next_attempt_at=now()+interval '2 seconds' WHERE id=$1::uuid AND edit_lease_token=$2::uuid`, deliveryID, editLease)
+				return true
+			}
+			defer conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock(hashtextextended('topic-identity:' || $1,0))`, destinationTopicID)
+			var correcting bool
+			if lockErr = conn.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tgstrm.topic_identity_jobs WHERE topic_id::text=$1 AND status<>'completed')`, destinationTopicID).Scan(&correcting); lockErr != nil {
+				return true
+			}
+			if correcting {
+				_, _ = s.DB.ExecContext(ctx, `UPDATE tgstrm.mirror_deliveries SET edit_status='pending',edit_lease_token=NULL,edit_lease_expires_at=NULL WHERE id=$1::uuid AND edit_lease_token=$2::uuid`, deliveryID, editLease)
+				return true
+			}
+			s.apiMu.RLock()
+			api := s.runtimeAPI
+			s.apiMu.RUnlock()
+			if api == nil {
+				s.failMirrorEdit(ctx, deliveryID, linkID, editLease, caption, errors.New("Telegram se está reconectando"))
+				return true
+			}
+			var applied sql.NullString
+			if err = s.DB.QueryRowContext(ctx, `SELECT last_applied_caption FROM tgstrm.mirror_deliveries WHERE id=$1::uuid`, deliveryID).Scan(&applied); err != nil {
+				return true
+			}
+			if applied.Valid {
+				remote, readErr := api.ChannelsGetMessages(ctx, &tg.ChannelsGetMessagesRequest{Channel: &tg.InputChannel{ChannelID: channelID, AccessHash: accessHash}, ID: []tg.InputMessageClass{&tg.InputMessageID{ID: messageTelegramID}}})
+				if readErr != nil {
+					s.failMirrorEdit(ctx, deliveryID, linkID, editLease, caption, readErr)
+					if _, flood := tgerr.AsFloodWait(readErr); flood {
+						return true
+					}
+					return false
+				}
+				verified := false
+				if modified, ok := remote.AsModified(); ok {
+					for _, item := range modified.GetMessages() {
+						if message, ok := item.(*tg.Message); ok && message.ID == messageTelegramID {
+							verified = message.Message == applied.String || message.Message == caption
+						}
+					}
+				}
+				if !verified {
+					_, _ = s.DB.ExecContext(ctx, `UPDATE tgstrm.mirror_deliveries SET edit_conflict=true,edit_status='failed',edit_last_error='El pie destino cambió manualmente; no se sobrescribirá',edit_lease_token=NULL,edit_lease_expires_at=NULL WHERE id=$1::uuid AND edit_lease_token=$2::uuid`, deliveryID, editLease)
+					return false
+				}
+			}
+			request := &tg.MessagesEditMessageRequest{Peer: &tg.InputPeerChannel{ChannelID: channelID, AccessHash: accessHash}, ID: messageTelegramID}
+			request.SetMessage(caption)
+			_, editErr := api.MessagesEditMessage(ctx, request)
+			if editErr != nil && !tgerr.Is(editErr, "MESSAGE_NOT_MODIFIED") {
+				s.failMirrorEdit(ctx, deliveryID, linkID, editLease, caption, editErr)
+				if _, flood := tgerr.AsFloodWait(editErr); flood {
+					return true
+				}
+				return false
+			}
+			result, updateErr := s.DB.ExecContext(ctx, `UPDATE tgstrm.mirror_deliveries SET
 			edit_status=CASE WHEN desired_caption IS DISTINCT FROM $3 THEN 'pending' ELSE 'idle' END,
-			edit_last_error=NULL,desired_caption=CASE WHEN desired_caption IS DISTINCT FROM $3 THEN desired_caption ELSE NULL END,
+			last_applied_caption=$3,edit_last_error=NULL,desired_caption=CASE WHEN desired_caption IS DISTINCT FROM $3 THEN desired_caption ELSE NULL END,
 			edit_lease_token=NULL,edit_lease_expires_at=NULL,updated_at=now()
 			WHERE id=$1::uuid AND edit_lease_token=$2::uuid`, deliveryID, editLease, caption)
-		if updateErr != nil {
+			if updateErr != nil {
+				return true
+			}
+			if changed, _ := result.RowsAffected(); changed != 1 {
+				return false
+			}
+			_, _ = s.DB.ExecContext(ctx, `UPDATE tgstrm.mirror_links SET last_error=NULL,last_mirrored_at=now(),updated_at=now() WHERE id=$1`, linkID)
+			_, _ = s.DB.ExecContext(ctx, `INSERT INTO tgstrm.outbox_events(event_type,aggregate_type,aggregate_id,payload) VALUES('mirror.progress','topic',$1::bigint,jsonb_build_object('link_id',$2::text,'status','edited'))`, destinationTopicID, linkID)
+			s.queueVideoRefresh(channelID, topicTelegramID)
+			return false
+		}()
+		if stop {
 			return
 		}
-		if changed, _ := result.RowsAffected(); changed != 1 {
-			continue
-		}
-		_, _ = s.DB.ExecContext(ctx, `UPDATE tgstrm.mirror_links SET last_error=NULL,last_mirrored_at=now(),updated_at=now() WHERE id=$1`, linkID)
-		_, _ = s.DB.ExecContext(ctx, `INSERT INTO tgstrm.outbox_events(event_type,aggregate_type,aggregate_id,payload) VALUES('mirror.progress','topic',$1::bigint,jsonb_build_object('link_id',$2::text,'status','edited'))`, destinationTopicID, linkID)
-		s.queueVideoRefresh(channelID, topicTelegramID)
 	}
 }
 
 func (s *Service) failMirrorEdit(ctx context.Context, deliveryID, linkID, editLease, caption string, cause error) {
 	detail := fmt.Sprintf("%.500s", cause.Error())
+	waitSeconds := 0
+	if wait, flood := tgerr.AsFloodWait(cause); flood {
+		waitSeconds = int(wait.Seconds()) + 1
+	}
 	var status string
 	err := s.DB.QueryRowContext(ctx, `UPDATE tgstrm.mirror_deliveries SET
 		edit_status=CASE WHEN desired_caption IS DISTINCT FROM $3 THEN 'pending' ELSE 'failed' END,
 		edit_last_error=CASE WHEN desired_caption IS DISTINCT FROM $3 THEN NULL ELSE $4 END,
 		edit_next_attempt_at=CASE WHEN desired_caption IS DISTINCT FROM $3 THEN now()
-			ELSE now()+make_interval(secs=>LEAST(300,power(2,LEAST(edit_attempts,8))::integer)) END,
+			ELSE now()+make_interval(secs=>GREATEST($5::integer,LEAST(300,power(2,LEAST(edit_attempts,8))::integer))) END,
 		edit_lease_token=NULL,edit_lease_expires_at=NULL,updated_at=now()
-		WHERE id=$1::uuid AND edit_lease_token=$2::uuid RETURNING edit_status`, deliveryID, editLease, caption, detail).Scan(&status)
+		WHERE id=$1::uuid AND edit_lease_token=$2::uuid RETURNING edit_status`, deliveryID, editLease, caption, detail, waitSeconds).Scan(&status)
+	if waitSeconds > 0 {
+		_, _ = s.DB.ExecContext(ctx, `UPDATE tgstrm.mirror_deliveries SET edit_next_attempt_at=GREATEST(edit_next_attempt_at,now()+make_interval(secs=>$1::integer)) WHERE edit_status IN ('pending','failed')`, waitSeconds)
+	}
 	if err != nil || status != "failed" {
 		return
 	}
@@ -565,3 +622,18 @@ func (s *Service) failMirror(ctx context.Context, deliveryID, linkID, deliveryLe
 	}
 	_, _ = s.DB.ExecContext(ctx, `UPDATE tgstrm.mirror_links SET last_error=$2,updated_at=now() WHERE id=$1`, linkID, detail)
 }
+
+const queueMirrorCaptionEditSQL = `UPDATE tgstrm.mirror_deliveries md SET desired_caption=$4,edit_status='pending',
+		source_edited_at=COALESCE(m.edited_at,m.sent_at),source_caption_snapshot=$4,edit_next_attempt_at=now(),edit_last_error=NULL,updated_at=now()
+		FROM tgstrm.mirror_links ml JOIN tgstrm.topics t ON t.id=ml.source_topic_id
+		JOIN tgstrm.chats c ON c.id=t.chat_id JOIN tgstrm.messages m ON m.topic_id=t.id
+		WHERE md.link_id=ml.id AND m.id=md.source_message_id AND ml.status='active' AND c.telegram_peer_id=$1 AND t.telegram_topic_id=$2
+		AND m.telegram_message_id=$3 AND md.source_caption_snapshot IS DISTINCT FROM $4`
+
+const reconcileMirrorCaptionEditSQL = `UPDATE tgstrm.mirror_deliveries md SET desired_caption=source.body,
+		edit_status='pending',source_edited_at=COALESCE(source.edited_at,source.sent_at),source_caption_snapshot=COALESCE(source.body,''),
+		edit_next_attempt_at=now(),edit_last_error=NULL,updated_at=now()
+		FROM tgstrm.mirror_links ml,tgstrm.messages source,tgstrm.messages target
+		WHERE md.link_id=ml.id AND source.id=md.source_message_id AND target.id=md.destination_message_id
+		AND ml.status='active' AND md.status='completed' AND md.edit_status='idle'
+		AND md.source_caption_snapshot IS DISTINCT FROM COALESCE(source.body,'')`

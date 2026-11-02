@@ -28,6 +28,9 @@ import (
 )
 
 type API struct {
+	libraryFilesystem sync.RWMutex
+	cabinetArtwork    cabinetArtworkCache
+	ambient           ambientCache
 	mu                sync.Mutex
 	store             *config.Store
 	db                *sql.DB
@@ -119,10 +122,19 @@ func NewWithOptions(store *config.Store, options Options) (*API, error) {
 				log.Printf("La caché persistente no está disponible: %v", cacheErr)
 			}
 			a.telegram = &telegramauth.Service{DB: db, Vault: store, PersistentCache: persistentCache}
+			// Revalidate the mixed-document gate before mirrors can resume after an offline gap.
+			if _, err = db.ExecContext(ctx, `UPDATE tgstrm.topic_replication_manifests mf SET status='pending',invalidated_at=now(),revision=mf.revision+1 WHERE EXISTS(SELECT 1 FROM tgstrm.topic_replications tr JOIN tgstrm.group_replications gr ON gr.id=tr.group_replication_id JOIN tgstrm.collection_replication_plans p ON p.id=gr.plan_id WHERE tr.manifest_id=mf.id AND tr.import_id IS NOT NULL AND p.confirmed_at IS NOT NULL)`); err != nil {
+				db.Close()
+				return nil, fmt.Errorf("prepare collection recovery: %w", err)
+			}
+			if _, err = db.ExecContext(ctx, `UPDATE tgstrm.collection_replication_plans p SET status='preparing',next_attempt_at=now(),updated_at=now() WHERE p.confirmed_at IS NOT NULL AND p.status IN ('review','completed') AND EXISTS(SELECT 1 FROM tgstrm.group_replications gr JOIN tgstrm.topic_replications tr ON tr.group_replication_id=gr.id JOIN tgstrm.topic_replication_manifests mf ON mf.id=tr.manifest_id WHERE gr.plan_id=p.id AND tr.import_id IS NULL AND NOT tr.excluded AND mf.invalidated_at IS NOT NULL)`); err != nil {
+				db.Close()
+				return nil, fmt.Errorf("schedule collection recovery: %w", err)
+			}
 			a.telegram.Start(context.Background())
 			backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 			a.backgroundCancel = backgroundCancel
-			for _, run := range []func(context.Context){a.runCatalogImportQueue, a.runExportReconciler, a.runMovieMatchReconciler, a.runTopicArtworkReconciler, a.runBackupScheduler} {
+			for _, run := range []func(context.Context){a.runMovieDuplicateCleanup, a.runMovieMonitorWorker, a.runCatalogImportQueue, a.runFileTransfers, a.runCollectionWorker, a.runCollectionMaintenanceWorker, a.runManifestRecheckWorker, a.runExportReconciler, a.runTopicIdentityWorker, a.runMovieMatchReconciler, a.runDirectMovieCaptionWorker, a.runTopicArtworkReconciler, a.runBackupScheduler} {
 				a.backgroundWG.Add(1)
 				go func(run func(context.Context)) { defer a.backgroundWG.Done(); run(backgroundCtx) }(run)
 			}
@@ -211,8 +223,32 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/jobs", a.sameOrigin(a.jobs))
 	mux.HandleFunc("POST /api/v1/jobs/{kind}/{id}/retry", a.sameOrigin(a.retryJob))
 	mux.HandleFunc("POST /api/v1/activity/clear", a.sameOrigin(a.clearActivity))
+	mux.HandleFunc("POST /api/v1/mirrors/{linkID}/reconnect", a.sameOrigin(a.reconnectMirror))
+	mux.HandleFunc("GET /api/v1/library/topics/{topicID}/location", a.sameOrigin(a.libraryTopicLocation))
+	mux.HandleFunc("POST /api/v1/library/replication-plans", a.sameOrigin(a.replicationPlans))
+	mux.HandleFunc("GET /api/v1/library/replication-plans/{planID}", a.sameOrigin(a.replicationPlan))
+	mux.HandleFunc("PATCH /api/v1/library/replication-plans/{planID}", a.sameOrigin(a.replicationPlan))
+	mux.HandleFunc("POST /api/v1/library/replication-plans/{planID}/confirm", a.sameOrigin(a.confirmReplicationPlan))
+	mux.HandleFunc("POST /api/v1/library/replication-plans/{planID}/{action}", a.sameOrigin(a.controlReplicationPlan))
+	mux.HandleFunc("GET /api/v1/library/cleanup", a.sameOrigin(a.libraryCleanup))
+	mux.HandleFunc("POST /api/v1/library/cleanup", a.sameOrigin(a.libraryCleanup))
+	mux.HandleFunc("GET /api/v1/library/cleanup/{jobID}", a.sameOrigin(a.libraryCleanupJob))
+	mux.HandleFunc("GET /api/v1/library/collections", a.sameOrigin(a.libraryCollections))
+	mux.HandleFunc("POST /api/v1/library/collections", a.sameOrigin(a.libraryCollections))
+	mux.HandleFunc("GET /api/v1/library/folders", a.sameOrigin(a.libraryFolders))
+	mux.HandleFunc("GET /api/v1/library/target", a.sameOrigin(a.libraryTarget))
+	mux.HandleFunc("PATCH /api/v1/library/target", a.sameOrigin(a.libraryTarget))
+	mux.HandleFunc("GET /api/v1/library/collections/{collectionID}", a.sameOrigin(a.libraryCollection))
+	mux.HandleFunc("GET /api/v1/library/collections/{collectionID}/groups/{memberID}/artwork", a.sameOrigin(a.collectionArtwork))
+	mux.HandleFunc("POST /api/v1/library/collections/{collectionID}/naming/preview", a.sameOrigin(a.previewCollectionNaming))
+	mux.HandleFunc("POST /api/v1/library/collections/{collectionID}/naming/apply", a.sameOrigin(a.applyCollectionNaming))
+	mux.HandleFunc("PATCH /api/v1/library/collections/{collectionID}/naming", a.sameOrigin(a.libraryNaming))
 	mux.HandleFunc("GET /api/v1/groups", a.sameOrigin(a.groups))
 	mux.HandleFunc("GET /api/v1/groups/{groupID}", a.sameOrigin(a.group))
+	mux.HandleFunc("GET /api/v1/file-transfers/targets", a.sameOrigin(a.fileTransferTargets))
+	mux.HandleFunc("POST /api/v1/file-transfers/{transferID}/cancel", a.sameOrigin(a.cancelFileTransfer))
+	mux.HandleFunc("GET /api/v1/file-transfers/{transferID}", a.sameOrigin(a.fileTransferStatus))
+	mux.HandleFunc("POST /api/v1/groups/{groupID}/topics/{topicID}/file-transfers", a.sameOrigin(a.createFileTransfer))
 	mux.HandleFunc("GET /api/v1/groups/{groupID}/topics", a.sameOrigin(a.groupTopics))
 	mux.HandleFunc("GET /api/v1/groups/{groupID}/video-scan", a.sameOrigin(a.groupVideoScan))
 	mux.HandleFunc("POST /api/v1/groups/{groupID}/video-scan", a.sameOrigin(a.groupVideoScan))
@@ -230,6 +266,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("HEAD /api/v1/videos/{videoID}/stream", a.sameOrigin(a.videoStream))
 	mux.HandleFunc("GET /stream/{assetID}", a.publicVideoStream)
 	mux.HandleFunc("HEAD /stream/{assetID}", a.publicVideoStream)
+	mux.HandleFunc("GET /api/v1/ambient/trending", a.sameOrigin(a.ambientTrending))
 	mux.HandleFunc("GET /api/v1/settings/media", a.sameOrigin(a.mediaSettings))
 	mux.HandleFunc("GET /api/v1/health/system", a.sameOrigin(a.systemHealth))
 	mux.HandleFunc("GET /api/v1/health/reconciliation", a.sameOrigin(a.reconciliation))
@@ -245,8 +282,11 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/tmdb/search", a.sameOrigin(a.searchTMDB))
 	mux.HandleFunc("GET /api/v1/search", a.sameOrigin(a.catalogSearch))
 	mux.HandleFunc("POST /api/v1/search/remote/index", a.sameOrigin(a.indexRemoteSearchResult))
+	mux.HandleFunc("GET /api/v1/groups/{groupID}/topics/{topicID}/identity-correction", a.sameOrigin(a.topicCorrectionStatus))
 	mux.HandleFunc("GET /api/v1/groups/{groupID}/topics/{topicID}/tmdb-match", a.sameOrigin(a.listTMDBMatches))
 	mux.HandleFunc("PUT /api/v1/groups/{groupID}/topics/{topicID}/tmdb-match", a.sameOrigin(a.confirmTMDBMatch))
+	mux.HandleFunc("GET /api/v1/groups/{groupID}/topics/{topicID}/export-status", a.sameOrigin(a.topicExportStates))
+	mux.HandleFunc("POST /api/v1/groups/{groupID}/topics/{topicID}/check", a.sameOrigin(a.checkTopic))
 	mux.HandleFunc("POST /api/v1/groups/{groupID}/topics/{topicID}/tmdb-scan", a.sameOrigin(a.startTMDBScan))
 	mux.HandleFunc("GET /api/v1/groups/{groupID}/topics/{topicID}/tmdb-scan", a.sameOrigin(a.tmdbScanStatus))
 	mux.HandleFunc("POST /api/v1/groups/{groupID}/topics/{topicID}/exports", a.sameOrigin(a.generateTopicSTRM))
@@ -254,6 +294,11 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/groups/{groupID}/topics/{topicID}/import", a.sameOrigin(a.catalogImportStatus))
 	mux.HandleFunc("POST /api/v1/groups/{groupID}/imports/preview", a.sameOrigin(a.previewCatalogImports))
 	mux.HandleFunc("POST /api/v1/groups/active", a.sameOrigin(a.selectGroup))
+	mux.HandleFunc("GET /api/v1/movie-monitors", a.sameOrigin(a.movieMonitors))
+	mux.HandleFunc("POST /api/v1/movie-monitors", a.sameOrigin(a.movieMonitors))
+	mux.HandleFunc("PATCH /api/v1/movie-monitors/{monitorID}", a.sameOrigin(a.movieMonitor))
+	mux.HandleFunc("GET /api/v1/movie-monitors/{monitorID}/review", a.sameOrigin(a.movieMonitorReview))
+	mux.HandleFunc("POST /api/v1/movie-monitors/{monitorID}/deliveries/{deliveryID}/match", a.sameOrigin(a.confirmMovieMonitorMatch))
 	mux.HandleFunc("GET /api/v1/mirrors", a.sameOrigin(a.mirrorLinks))
 	mux.HandleFunc("POST /api/v1/mirrors", a.sameOrigin(a.mirrorLinks))
 	mux.HandleFunc("PATCH /api/v1/mirrors/{linkID}", a.sameOrigin(a.mirrorLink))
@@ -574,12 +619,19 @@ func (a *API) topicMessages(w http.ResponseWriter, r *http.Request) {
 // placeholders can be interleaved in their real season/episode order.
 func enrichTopicEpisodeNumbers(messages []telegramauth.TopicMessage) {
 	for i := range messages {
+		episode, detected := detectEpisode(messages[i].FileName, messages[i].Body)
 		if messages[i].EpisodeNumber > 0 {
+			messages[i].EpisodeSource = "confirmed"
+			if detected && episode.Season == messages[i].SeasonNumber && episode.Episode == messages[i].EpisodeNumber {
+				messages[i].EpisodeEndNumber = episode.lastEpisode()
+			}
 			continue
 		}
-		if episode, ok := detectEpisode(messages[i].FileName, messages[i].Body); ok {
+		if detected {
 			messages[i].SeasonNumber = episode.Season
 			messages[i].EpisodeNumber = episode.Episode
+			messages[i].EpisodeEndNumber = episode.lastEpisode()
+			messages[i].EpisodeSource = episode.Source
 		}
 	}
 }
@@ -623,6 +675,12 @@ func (a *API) groupTopics(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		fail(w, 500, "group_failed", "No se pudo cargar el grupo.")
 		return
+	}
+	if !group.Forum {
+		if _, err = service.EnsureWholeGroupTopic(r.Context(), groupID, false); err != nil {
+			fail(w, 500, "history_scope_failed", "No se pudo preparar el historial del grupo.")
+			return
+		}
 	}
 	syncState := "ready"
 	if group.Forum && r.URL.Query().Get("refresh") != "0" {

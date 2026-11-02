@@ -53,3 +53,11 @@ func TestDeletedTopicTreesAreRecursiveButNeverSharedOrRoot(t *testing.T) {
 		t.Fatal("library root was selected")
 	}
 }
+
+func TestDeletedTopicNeverSelectsSharedRecoveryTree(t *testing.T) {
+	root := t.TempDir()
+	trees := deletedTopicTrees([]reconciledExport{{rootPath: root, relativePath: ".tgstrm-recovery/episode-corrections/export-a/E01.strm", topicActive: false, chatActive: true}})
+	if len(trees) != 0 {
+		t.Fatal("shared recovery tree selected for recursive removal", trees)
+	}
+}

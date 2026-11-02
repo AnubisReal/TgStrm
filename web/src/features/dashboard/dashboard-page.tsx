@@ -1,6 +1,13 @@
+import { FileTransferButton } from "../transfers/file-transfer-button";
+import { PillSelect } from "../../components/ui/pill-select";
+import { ReplicationReview } from "../library/replication-review";
+import { ReplicationSourcePicker } from "../library/replication-source-picker";
+import { CollectionLibrary } from "../library/collection-library";
+import { AmbientMode } from "../ambient/ambient-mode";
+import { SeasonPicker } from "../../components/ui/season-picker";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
-import { Link, Navigate, useLocation, useNavigate, useParams } from "react-router";
+import { Link, Navigate, useLoaderData, useLocation, useNavigate, useParams } from "react-router";
 import {
   ArrowLeft,
   ArrowUpRight,
@@ -68,6 +75,7 @@ type Group = {
   username?: string;
   forum: boolean;
   active: boolean;
+  managed?: boolean;
 };
 type Topic = {
   id: string;
@@ -108,8 +116,11 @@ type TopicMessage = {
   height?: number;
   duration_seconds?: number;
   export_error?: string;
+  export_status?: "written" | "pending" | "error";
   season_number?: number;
   episode_number?: number;
+  episode_end_number?: number;
+  episode_source?: string;
 };
 type MessageResponse = {
   topic: Topic;
@@ -139,12 +150,12 @@ type TMDBMatch = TMDBResult & {
 };
 type TopicArtwork = { topic_id: string; kind: "show" | "collection"; title?: string; year?: string; backdrop_path?: string; poster_paths: string[] };
 type GroupVideoScan = { status: "idle" | "running" | "ready" | "stale"; total_topics: number; completed_topics: number; video_count: number; total_bytes: number; failed_topics: number; last_error?: string };
-type ImportDestination = { id: string; title: string; library_kind: string };
-type ImportPreview = { topic_id: string; source_title: string; topic_title?: string; video_count: number; suggested_id: number; candidates: TMDBResult[]; media_type?: "tv" | "movie"; destinations?: ImportDestination[]; preparation_status: "idle" | "running" | "ready" | "failed"; preparation_error?: string };
+type ImportDestination = { id: string; title: string; library_kind: string; group_id: string; group_title: string; tmdb_id: number };
+type ImportPreview = { topic_id: string; source_title: string; topic_title?: string; video_count: number; suggested_id: number; candidates: TMDBResult[]; media_type?: "tv" | "movie"; destinations?: ImportDestination[]; destination_groups?: { id: string; title: string; bucket: string; catalogue: boolean }[]; preparation_status: "idle" | "running" | "ready" | "failed"; preparation_error?: string };
 type ImportStatus = { status: "idle" | "pending" | "running" | "completed" | "failed"; destination_title?: string; requested?: number; completed?: number; failed?: number; last_error?: string };
 type ActivityChild = { id: string; status: string; detail: string; occurred_at: string };
 type ActivityItem = { id: string; kind: "import" | "mirror" | "strm" | "review" | "topic_deleted" | "episode_replaced" | "backup"; status: string; title: string; detail: string; occurred_at: string; href?: string; children?: ActivityChild[] };
-type JobItem = { id: string; kind: "import" | "mirror" | "strm" | "scan"; status: string; title: string; detail: string; updated_at: string; href?: string };
+type JobItem = { id: string; kind: "import" | "mirror" | "strm" | "scan" | "replication" | "rename"; status: string; title: string; detail: string; updated_at: string; href?: string };
 type JobsResponse = { items: JobItem[]; recent_completed: JobItem[] };
 type NotificationLevel = "strict" | "balanced" | "essential";
 type EpisodeResolution = {
@@ -170,14 +181,20 @@ const formatDuration = (seconds?: number) => {
   return [hours, minutes, rest].map((part, index) => index === 0 ? String(part) : String(part).padStart(2, "0")).join(":");
 };
 
-export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settings" | "manage" | "import" | "activity" | "mirror" | "mirror-manage" }) {
+export function DashboardPage({ mode = "catalog" }: { mode?: "library" | "catalog" | "settings" | "manage" | "import" | "activity" | "mirror" | "mirror-manage" | "replication-review" }) {
   const location = useLocation();
   const navigate = useNavigate();
-  const { groupId, topicId, topicIds, videoId } = useParams();
+  const { groupId: routeGroupId, topicId, topicIds, videoId, collectionId, planId } = useParams();
+  const loaderData = useLoaderData() as { libraryGroupId?: string } | undefined;
+  const isLibrary = mode === "library";
+  const groupId = isLibrary ? loaderData?.libraryGroupId : routeGroupId;
+  const catalogBase = isLibrary ? collectionId ? `/library/collections/${collectionId}${groupId ? `/groups/${groupId}` : ""}` : "/library" : groupId ? `/groups/${groupId}` : "/home";
   const [workspaceMode, setWorkspaceMode] = useState<"catalog" | "manage">(() =>
     sessionStorage.getItem("tgstrm.workspace-mode") === "manage" ? "manage" : "catalog",
   );
-  const activeMode = mode === "settings" ? "settings" : mode === "activity" ? "activity" : mode === "mirror" || mode === "mirror-manage" ? "mirror" : mode === "manage" || mode === "import" ? "manage" : workspaceMode;
+  const activeMode = mode === "library" ? location.pathname.endsWith("/manage") ? "manage" : workspaceMode : mode === "settings" ? "settings" : mode === "activity" ? "activity" : mode === "mirror" || mode === "mirror-manage" ? "mirror" : mode === "manage" || mode === "import" || mode === "replication-review" ? "manage" : workspaceMode;
+  const currentScope = useRef("");
+  currentScope.current = `${groupId || ""}:${topicId || ""}`;
   const [profile, setProfile] = useState<Profile>();
   const [failed, setFailed] = useState(false);
   const [dark, setDark] = useState(() => {
@@ -190,15 +207,60 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
   const [logoutOpen, setLogoutOpen] = useState(false);
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [logoutError, setLogoutError] = useState("");
+  const [selectedSourceGroups, setSelectedSourceGroups] = useState<string[]>([]);
+  const [selectingSourceGroups, setSelectingSourceGroups] = useState(false);
   const [groups, setGroups] = useState<Group[]>([]);
   const [groupDetail, setGroupDetail] = useState<Group>();
   const [topics, setTopics] = useState<Topic[]>([]);
   const [topicDetail, setTopicDetail] = useState<Topic>();
+  const [topicCorrection, setTopicCorrection] = useState<{status:string;phase?:string;completed?:number;total?:number;detail?:string;replicated?:boolean}>();
+  useEffect(() => {
+    setTopicCorrection(undefined);
+    if (!groupId || !topicId) return;
+    const controller = new AbortController();
+    let busy = false;
+    let refreshAgain = false;
+    const update = async () => {
+      if (busy) {refreshAgain = true;return;}
+      busy = true;
+      try {
+        const response = await fetch(`/api/v1/groups/${encodeURIComponent(groupId)}/topics/${encodeURIComponent(topicId)}/identity-correction`, {credentials:"same-origin",signal:controller.signal});
+        if (response.ok) { const data = await response.json(); if (!controller.signal.aborted) setTopicCorrection(data); }
+      } catch { /* Keep the last confirmed state during a reconnect. */ }
+      finally { busy = false; if (refreshAgain && !controller.signal.aborted) {refreshAgain=false;void update();} }
+    };
+    void update();
+    const refresh = () => void update();
+    window.addEventListener("tgstrm:topic-correction",refresh);
+    return () => {controller.abort();window.removeEventListener("tgstrm:topic-correction",refresh);};
+  },[groupId,topicId]);
+
   const [messages, setMessages] = useState<TopicMessage[]>([]);
+  const [selectedSeason, setSelectedSeason] = useState("all");
+  const [exportReviewTarget, setExportReviewTarget] = useState<TopicMessage>();
+  const exportReviewRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!exportReviewTarget) return;
+    const previousFocus = document.activeElement as HTMLElement | null;
+    const dialog = exportReviewRef.current;
+    dialog?.querySelector<HTMLButtonElement>("button")?.focus();
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); setExportReviewTarget(undefined); }
+      if (event.key !== "Tab" || !dialog) return;
+      const controls = [...dialog.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), [tabindex="0"]')];
+      const first = controls[0], last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    };
+    document.addEventListener("keydown", handleKey);
+    return () => { document.removeEventListener("keydown", handleKey); if (previousFocus?.isConnected) previousFocus.focus(); };
+  }, [exportReviewTarget]);
+  useEffect(() => { setSelectedSeason("all"); setExportReviewTarget(undefined); }, [groupId, topicId]);
   const [messageState, setMessageState] = useState<"loading" | "ready" | "stale" | "missing">("ready");
   const [nextCursor, setNextCursor] = useState(0);
   const [hasMoreMessages, setHasMoreMessages] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [paginationError, setPaginationError] = useState(false);
   const [videoDetail, setVideoDetail] = useState<VideoResponse>();
   const [videoState, setVideoState] = useState<"loading" | "ready" | "missing">("ready");
   const [playerState, setPlayerState] = useState<"loading" | "ready" | "error">("loading");
@@ -207,14 +269,26 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
     groupId ? "loading" : "ready",
   );
   const [groupQuery, setGroupQuery] = useState("");
+  const [managementFilter, setManagementFilter] = useState<"all" | "review" | "unexported">("all");
+  useEffect(() => { setManagementFilter("all"); }, [groupId, topicId]);
   const [selectedTopicIds, setSelectedTopicIds] = useState<Set<string>>(new Set());
   const [selectedMessageIds, setSelectedMessageIds] = useState<Set<string>>(new Set());
   const [selectingTopics, setSelectingTopics] = useState(false);
   const [selectingVideos, setSelectingVideos] = useState(false);
   const [exportState, setExportState] = useState("");
+  const [operationHasError, setOperationHasError] = useState(false);
+  const [checkingTopic, setCheckingTopic] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
   const [importPreview, setImportPreview] = useState<ImportPreview[]>([]);
   const [importChoices, setImportChoices] = useState<Record<string, number>>({});
   const [importMediaTypes, setImportMediaTypes] = useState<Record<string, "tv" | "movie">>({});
+  const [importTargetScopes, setImportTargetScopes] = useState<Record<string, string>>({});
+  const [importGroupSearch, setImportGroupSearch] = useState<Record<string, string>>({});
+  const [importTopicsByGroup, setImportTopicsByGroup] = useState<Record<string, ImportDestination[]>>({});
+  const [importTopicsLoading, setImportTopicsLoading] = useState<Record<string, boolean>>({});
+  const [importTopicsErrors, setImportTopicsErrors] = useState<Record<string, string>>({});
+  const [importDestinationGroups, setImportDestinationGroups] = useState<Record<string, string>>({});
+  const [importDestinationSearch, setImportDestinationSearch] = useState<Record<string, string>>({});
   const [importDestinations, setImportDestinations] = useState<Record<string, string>>({});
   const [importQueries, setImportQueries] = useState<Record<string, string>>({});
   const [importSearching, setImportSearching] = useState<string>();
@@ -270,7 +344,6 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
   const [mobileCondensed, setMobileCondensed] = useState(false);
   const [draggingScroll, setDraggingScroll] = useState(false);
   const frameRef = useRef<HTMLElement>(null);
-  const topicCatalogCompleteRef = useRef(false);
   const notificationAreaRef = useRef<HTMLDivElement>(null);
   const accountAreaRef = useRef<HTMLDivElement>(null);
   const globalSearchInputRef = useRef<HTMLInputElement>(null);
@@ -289,6 +362,12 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
       // Theme selection still works for this page view if storage is blocked.
     }
   }, [dark]);
+
+  useEffect(() => {
+    if (mode === "import" || !groupId || topicId || groupDetail?.forum !== false) return;
+    const whole = topics.find(topic => topic.telegram_id === 0);
+    if (whole) navigate(`${catalogBase}/topics/${whole.id}${activeMode === "manage" ? "/manage" : ""}`, { replace: true });
+  }, [mode, groupId, topicId, groupDetail?.forum, topics, catalogBase, activeMode, navigate]);
 
   useLayoutEffect(() => {
     const frame = frameRef.current;
@@ -435,11 +514,11 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
   }, [groupId, topicId]);
 
   useEffect(() => {
-    if (mode === "manage") {
+    if (mode === "manage" || isLibrary && location.pathname.endsWith("/manage")) {
       sessionStorage.setItem("tgstrm.workspace-mode", "manage");
       setWorkspaceMode("manage");
     }
-  }, [mode]);
+  }, [mode, isLibrary, location.pathname]);
 
   const selectWorkspaceMode = (nextMode: "catalog" | "manage") => {
     sessionStorage.setItem("tgstrm.workspace-mode", nextMode);
@@ -506,7 +585,8 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
       });
       const data = await response.json() as { relative_path?: string; message?: string };
       if (!response.ok) throw new Error(data.message || "No se pudo guardar el episodio.");
-      setMessages((current) => current.map((message) => message.id === resolutionTarget.id ? { ...message, export_error: undefined } : message));
+      setMessages((current) => current.map((message) => message.id === resolutionTarget.id ? { ...message, export_error: undefined, export_status: "written", season_number: resolutionSeason, episode_number: resolutionEpisode, episode_end_number: resolutionEpisode, episode_source: "manual" } : message));
+      setMissingEpisodes((current) => current.filter((episode) => episode.season !== resolutionSeason || episode.episode !== resolutionEpisode));
       setExportState(data.relative_path ? `STRM creado · ${data.relative_path}` : "Episodio asignado y STRM creado.");
       setResolutionTarget(undefined); setResolutionInfo(undefined); setEpisodeOptions([]);
     } catch (error) { setResolutionError((error as Error).message); }
@@ -652,7 +732,14 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
       setMissingEpisodes([]);
       return;
     }
-    topicCatalogCompleteRef.current = false;
+    setLoadingMore(false);
+    setPaginationError(false);
+    setMessages([]);
+    setMissingEpisodes([]);
+    setTopicDetail(undefined);
+    setHasMoreMessages(false);
+    setCheckingTopic(false);
+    setExportState("");
     const controller = new AbortController();
     setMessageState("loading");
     fetch(`/api/v1/groups/${encodeURIComponent(groupId)}/topics/${encodeURIComponent(topicId)}`, {
@@ -670,7 +757,6 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
         setMessages(data.messages);
         setNextCursor(data.next_cursor);
         setHasMoreMessages(data.has_more);
-        topicCatalogCompleteRef.current = !data.has_more;
         setMessageState(data.sync);
       })
       .catch((error: unknown) => {
@@ -680,14 +766,14 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
   }, [groupId, topicId]);
 
   useEffect(() => {
-    if (!groupId || !topicId) return;
+    if (!groupId || !topicId || hasMoreMessages || messageState === "loading" || topicDetail?.id !== topicId) return;
     const controller = new AbortController();
     fetch(`/api/v1/groups/${encodeURIComponent(groupId)}/topics/${encodeURIComponent(topicId)}/episode-gaps?refresh=1`, { credentials: "same-origin", signal: controller.signal })
       .then((response) => response.ok ? response.json() as Promise<{ missing: MissingEpisode[] }> : Promise.reject())
       .then((data) => setMissingEpisodes(data.missing || []))
       .catch((error: unknown) => { if ((error as { name?: string }).name !== "AbortError") setMissingEpisodes([]); });
     return () => controller.abort();
-  }, [groupId, topicId]);
+  }, [groupId, topicId, hasMoreMessages, messageState, topicDetail?.id]);
 
   useEffect(() => {
     if (!videoId) { setVideoDetail(undefined); setVideoState("ready"); return; }
@@ -706,24 +792,29 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
 
   const loadMoreMessages = () => {
     if (!groupId || !topicId || !nextCursor || loadingMore) return;
+    const scope = currentScope.current;
+    setPaginationError(false);
     setLoadingMore(true);
     fetch(`/api/v1/groups/${encodeURIComponent(groupId)}/topics/${encodeURIComponent(topicId)}?before=${nextCursor}`, { credentials: "same-origin" })
       .then((response) => response.ok ? response.json() as Promise<MessageResponse> : Promise.reject())
       .then((data) => {
+        if (currentScope.current !== scope) return;
+        if (data.has_more && (!data.next_cursor || data.next_cursor >= nextCursor)) {
+          throw new Error("History pagination did not advance");
+        }
         setMessages((current) => [...current, ...data.messages.filter((incoming) => !current.some((item) => item.id === incoming.id))]);
         setNextCursor(data.next_cursor);
         setHasMoreMessages(data.has_more);
-        topicCatalogCompleteRef.current = !data.has_more;
       })
-      .catch(() => undefined)
-      .finally(() => setLoadingMore(false));
+      .catch(() => { if (currentScope.current === scope) setPaginationError(true); })
+      .finally(() => { if (currentScope.current === scope) setLoadingMore(false); });
   };
 
   useEffect(() => {
-    if (!topicId || !hasMoreMessages || !nextCursor || loadingMore || messageState === "loading") return;
+    if (!topicId || !hasMoreMessages || !nextCursor || loadingMore || paginationError || messageState === "loading") return;
     const timer = window.setTimeout(loadMoreMessages, 1250);
     return () => window.clearTimeout(timer);
-  }, [topicId, hasMoreMessages, nextCursor, loadingMore, messageState]);
+  }, [topicId, hasMoreMessages, nextCursor, loadingMore, paginationError, messageState]);
 
   useEffect(() => {
     fetch("/api/v1/groups", { credentials: "same-origin" })
@@ -740,6 +831,7 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
     setSelectedTopicIds(new Set());
     setSelectedMessageIds(new Set());
     setExportState("");
+    setOperationHasError(false);
   }, [groupId, topicId, activeMode]);
 
   useEffect(() => {
@@ -893,6 +985,10 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
 
   const generateSTRM = async (topicIDs: string[], messageIDs?: string[]) => {
     if (!groupId || !topicIDs.length) return;
+    if (exportBusy) return;
+    const scope = currentScope.current;
+    setExportBusy(true);
+    setOperationHasError(false);
     setExportState("Generando STRM…");
     let written = 0;
     let requested = 0;
@@ -907,16 +1003,75 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
         if (!response.ok) throw new Error(data.message || "No se pudo generar la biblioteca.");
         written += data.written || 0; requested += data.requested || 0; unresolved += data.unresolved || 0;
       }
-      setExportState(`${written} de ${requested} STRM escritos correctamente${unresolved ? ` · ${unresolved} sin episodio identificable` : ""}`);
-    } catch (error) { setExportState((error as Error).message); }
+      if (currentScope.current === scope) setExportState(`${written} de ${requested} STRM escritos correctamente${unresolved ? ` · ${unresolved} sin episodio identificable` : ""}`);
+    } catch (error) { if (currentScope.current === scope) { setOperationHasError(true); setExportState((error as Error).message); } }
+    finally { setExportBusy(false); }
+  };
+
+  const checkCurrentTopic = async () => {
+    if (!groupId || !topicId || checkingTopic) return;
+    const scope = currentScope.current;
+    setCheckingTopic(true);
+    setOperationHasError(false);
+    setExportState("Comprobando este topic con Telegram y revisando sus STRM…");
+    try {
+      const response = await fetch(`/api/v1/groups/${encodeURIComponent(groupId)}/topics/${encodeURIComponent(topicId)}/check`, { method: "POST", credentials: "same-origin" });
+      const report = await response.json() as { exports_checked: number; missing_files: number; errored_exports: number; message?: string };
+      if (!response.ok) throw new Error(report.message || "No se pudo comprobar el topic.");
+      const snapshot = await fetch(`/api/v1/groups/${encodeURIComponent(groupId)}/topics/${encodeURIComponent(topicId)}?refresh=0`, { credentials: "same-origin" });
+      if (!snapshot.ok) throw new Error("Comprobación terminada; no se pudo actualizar la vista.");
+      const data = await snapshot.json() as MessageResponse;
+      if (currentScope.current !== scope) return;
+      setMessages(data.messages); setTopicDetail(data.topic); setNextCursor(data.next_cursor); setHasMoreMessages(data.has_more);
+      setOperationHasError(report.missing_files + report.errored_exports > 0);
+      setExportState(`Topic comprobado · ${report.exports_checked} STRM revisados · ${report.missing_files} ausentes · ${report.errored_exports} con incidencias.`);
+    } catch (error) { if (currentScope.current === scope) { setOperationHasError(true); setExportState((error as Error).message); } }
+    finally { if (currentScope.current === scope) setCheckingTopic(false); }
   };
 
   const openImportReview = (topicIDs: string[], messageIDsByTopic: Record<string, string[]> = {}) => {
     if (!groupId || !topicIDs.length) return;
     const orderedTopicIDs = [...new Set(topicIDs)].sort((left, right) => Number(left) - Number(right));
+    setImportTargetScopes({});
+    setImportDestinationGroups({});
+    setImportDestinations({});
+    setImportGroupSearch({});
     sessionStorage.setItem(`tgstrm.import-review:${groupId}`, JSON.stringify({ message_ids_by_topic: messageIDsByTopic }));
     sessionStorage.removeItem(`tgstrm.import-media-types:${groupId}`);
     navigate(`/groups/${groupId}/import/review/${orderedTopicIDs.join(",")}`);
+  };
+
+  const resolvedImportGroup = (item: ImportPreview) => {
+    if (Object.prototype.hasOwnProperty.call(importDestinationGroups, item.topic_id)) return importDestinationGroups[item.topic_id];
+    if (importTargetScopes[item.topic_id] === "external") return "";
+    const existing = item.destinations?.find(destination => destination.id === importDestinations[item.topic_id]);
+    if (existing) return existing.group_id;
+    const groups = (item.destination_groups || []).filter(group => group.catalogue);
+    if (groups.length === 1) return groups[0].id;
+    if ((importMediaTypes[item.topic_id] || item.media_type || "tv") !== "tv") return "";
+    const title = item.candidates.find(candidate => candidate.id === importChoices[item.topic_id])?.title || "";
+    const initial = Array.from(title.trim().toLocaleUpperCase("es"))[0] || "";
+    const bucket = initial === "Ñ" ? "Ñ" : initial.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const suggested = groups.filter(group => group.bucket === (/^[0-9]$/.test(bucket) ? "0-9" : bucket));
+    return suggested.length === 1 ? suggested[0].id : "";
+  };
+
+  const loadImportTargetTopics = async (targetGroup: string) => {
+    if (!targetGroup) return;
+    setImportTopicsLoading(current => ({...current,[targetGroup]:true}));
+    setImportTopicsErrors(current => ({...current,[targetGroup]:""}));
+    try {
+      const response = await fetch(`/api/v1/groups/${encodeURIComponent(targetGroup)}/topics`,{credentials:"same-origin"});
+      const data = await response.json() as TopicResponse & {message?:string};
+      if (!response.ok) throw Error(data.message || "No se pudieron cargar los topics de destino.");
+      setImportTopicsByGroup(current => ({...current,[targetGroup]:(data.topics || []).filter(topic => !topic.hidden && !topic.closed && topic.telegram_id > 0).map(topic => ({id:topic.id,title:topic.title,library_kind:topic.library_kind,group_id:targetGroup,group_title:data.group.title,tmdb_id:0}))}));
+    } catch(error) {setImportTopicsErrors(current=>({...current,[targetGroup]:(error as Error).message}));}
+    finally {setImportTopicsLoading(current=>({...current,[targetGroup]:false}));}
+  };
+  const importTopicOptions = (item: ImportPreview) => {
+    const target = resolvedImportGroup(item);
+    const saved = (item.destinations || []).filter(destination=>destination.group_id===target);
+    return [...saved,...(importTopicsByGroup[target] || []).filter(destination=>!saved.some(existing=>existing.id===destination.id))];
   };
 
   const confirmReviewedImports = async () => {
@@ -926,10 +1081,11 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
     try {
       for (const item of importPreview) {
         const tmdbID = importChoices[item.topic_id];
+        if (!resolvedImportGroup(item)) throw new Error(`Selecciona un grupo destino para ${item.source_title}.`);
         if (!tmdbID) throw new Error(`Selecciona una coincidencia para ${item.source_title}.`);
         const response = await fetch(`/api/v1/groups/${encodeURIComponent(groupId)}/topics/${encodeURIComponent(item.topic_id)}/import`, {
           method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message_ids: stored.message_ids_by_topic?.[item.topic_id] || [], tmdb_id: tmdbID, media_type: importMediaTypes[item.topic_id] || item.media_type || "tv", destination_topic_id: importDestinations[item.topic_id] || "" }),
+          body: JSON.stringify({ message_ids: stored.message_ids_by_topic?.[item.topic_id] || [], tmdb_id: tmdbID, media_type: importMediaTypes[item.topic_id] || item.media_type || "tv", destination_group_id: resolvedImportGroup(item), destination_topic_id: importDestinations[item.topic_id] || "" }),
         });
         const data = await response.json() as { requested?: number; destination_title?: string; message?: string };
         if (!response.ok) throw new Error(data.message || `No se pudo preparar ${item.source_title}.`);
@@ -961,6 +1117,8 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
 
   const changeImportMediaType = async (topicID: string, mediaType: "tv" | "movie") => {
     if (!groupId) return;
+    setImportDestinations(current => ({...current, [topicID]: ""}));
+    setImportDestinationGroups(current => { const next = {...current}; delete next[topicID]; return next; });
     const next = { ...importMediaTypes, [topicID]: mediaType };
     setImportMediaTypes(next);
     sessionStorage.setItem(`tgstrm.import-media-types:${groupId}`, JSON.stringify(next));
@@ -1060,6 +1218,7 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
       setTMDBMatches((current) => [{ ...data.match!, match_id: data.id!, media_type: "tv", tmdb_id: data.match!.id, message_id: "" }, ...current.filter((item) => item.message_id)]);
       setExportState(`TMDB asociado a ${data.match.title}${data.match.release_date ? ` (${data.match.release_date.slice(0, 4)})` : ""}.`);
       setTopicMatchOpen(false);
+      window.dispatchEvent(new Event("tgstrm:topic-correction"));
     } catch (error) { setTopicMatchError((error as Error).message); }
     finally { setTopicMatchState("idle"); }
   };
@@ -1106,8 +1265,9 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
         { ...data.match!, id: data.match!.id, match_id: data.id!, media_type: "movie", tmdb_id: data.match!.id, message_id: targetID },
         ...current.filter((match) => match.message_id !== targetID),
       ]);
-      setMessages((current) => current.map((message) => message.id === targetID ? { ...message, export_error: undefined } : message));
+      setMessages((current) => current.map((message) => message.id === targetID ? { ...message, export_error: undefined, export_status: "pending" } : message));
       setMovieMatchTarget(undefined);
+      setOperationHasError(false);
       setExportState(`${data.match.title}${data.match.release_date ? ` (${data.match.release_date.slice(0, 4)})` : ""} se asociará y generará automáticamente.`);
     } catch (error) {
       setMovieMatchError((error as Error).message);
@@ -1190,23 +1350,31 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
 		.catch(() => undefined);
 	};
 
+    const reloadExportStates = () => {
+      if (!groupId || !topicId) return;
+      fetch(`/api/v1/groups/${encodeURIComponent(groupId)}/topics/${encodeURIComponent(topicId)}/export-status`, { credentials: "same-origin" })
+        .then((response) => response.ok ? response.json() as Promise<{ states: Array<Pick<TopicMessage, "id" | "export_status" | "export_error">> }> : Promise.reject())
+        .then((data) => {
+          if (stopped) return;
+          const states = new Map(data.states.map((state) => [state.id, state]));
+          setMessages((current) => current.map((message) => states.has(message.id) ? { ...message, export_status: states.get(message.id)!.export_status, export_error: states.get(message.id)!.export_error } : message));
+        }).catch(() => undefined);
+    };
+
     const reloadCurrentVideos = () => {
 	  if (!topicId || !groupId) return;
 	  const currentGroupID = groupId;
 	  const currentTopicID = topicId;
 	  window.clearTimeout(refreshTimer);
 	  refreshTimer = window.setTimeout(() => {
+        reloadExportStates();
 		fetch(`/api/v1/groups/${encodeURIComponent(currentGroupID)}/topics/${encodeURIComponent(currentTopicID)}?refresh=0`, { credentials: "same-origin" })
 		  .then((response) => response.ok ? response.json() as Promise<MessageResponse> : Promise.reject())
 		  .then((data) => {
 			if (stopped) return;
 			setTopicDetail(data.topic);
 			setMessages((current) => [...data.messages, ...current.filter((stored) => !data.messages.some((fresh) => fresh.id === stored.id))]);
-			if (!topicCatalogCompleteRef.current) {
-			  setNextCursor(data.next_cursor);
-			  setHasMoreMessages(data.has_more);
-			  topicCatalogCompleteRef.current = !data.has_more;
-			}
+			// Live snapshots refresh the newest page; only pagination owns the history cursor.
 			setMessageState(data.sync);
 			fetch(`/api/v1/groups/${encodeURIComponent(currentGroupID)}/topics/${encodeURIComponent(currentTopicID)}/episode-gaps?refresh=0`, { credentials: "same-origin" })
 			  .then((response) => response.ok ? response.json() as Promise<{ missing: MissingEpisode[] }> : Promise.reject())
@@ -1221,6 +1389,7 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
       socket = new WebSocket(`${protocol}//${window.location.host}/api/v1/events`);
       socket.onopen = () => {
         retry = 0;
+        window.dispatchEvent(new Event("tgstrm:topic-correction"));
 		topicId ? reloadCurrentVideos() : groupId ? reloadCachedTopics() : reloadGroups();
       };
       socket.onmessage = (message) => {
@@ -1230,11 +1399,16 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
             reloadCachedTopics();
 			reloadCachedTopicArtwork();
           }
-		  if (event.type === "videos.snapshot" && event.aggregate_id === topicId) {
+		  if (event.type === "library.identity.progress" && event.aggregate_id === topicId) {
+            window.dispatchEvent(new Event("tgstrm:topic-correction"));
+            reloadCurrentVideos();
+          }
+          if (event.type === "videos.snapshot" && event.aggregate_id === topicId) {
 			reloadCurrentVideos();
 		  }
 		  if (event.type === "groups.snapshot" && !groupId) { reloadGroups(); }
 		  if (event.type === "catalog.import.progress") { setImportRefreshNonce((value) => value + 1); }
+		  if (event.type.startsWith("library.") || event.type === "videos.snapshot" || event.type === "topics.snapshot" || event.type === "groups.snapshot") window.dispatchEvent(new Event("tgstrm:library-update"));
 		  if (event.type === "mirror.progress") { window.dispatchEvent(new CustomEvent("tgstrm:mirror-progress")); }
 		  reloadOperationalState();
         } catch { /* Ignore malformed server events and keep the stream alive. */ }
@@ -1305,11 +1479,11 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
           .includes(query),
       )
     : groups;
-  const visibleTopics = query
-    ? topics.filter((topic) =>
-        topic.title.toLocaleLowerCase().includes(query),
-      )
-    : topics;
+  const visibleTopics = topics.filter(
+    (topic) => !topic.hidden && (!query || topic.title.toLocaleLowerCase().includes(query)) &&
+      (activeMode !== "manage" || managementFilter === "all" ||
+        (managementFilter === "review" ? topic.unresolved_count > 0 : topic.video_count > topic.exported_count)),
+  );
   const isPrimaryGroup = groups.some((group) => group.active && group.id === groupId);
   const focusedActivityKey = new URLSearchParams(location.search).get("focus") || "";
   const notificationItems = notificationActivity.filter((item) => {
@@ -1354,11 +1528,17 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
       setActivityRefreshNonce((current) => current + 1);
     } catch (error) { setJobRetryError((error as Error).message); } finally { setRetryingJob(undefined); }
   };
-  const visibleMessages = messages.filter((message) => !query || `${message.body} ${message.file_name} ${message.media_type || ""}`.toLocaleLowerCase().includes(query));
-  const visibleMissingEpisodes = missingEpisodes.filter((episode) => !query || `${episode.title} S${String(episode.season).padStart(2, "0")}E${String(episode.episode).padStart(2, "0")}`.toLocaleLowerCase().includes(query));
+  const availableSeasons = [...new Set([...messages.filter((message) => !!message.episode_number).map((message) => message.season_number ?? 0), ...missingEpisodes.map((episode) => episode.season)])].sort((a, b) => a - b);
+  const visibleMessages = messages.filter((message) =>
+    (topicDetail?.library_kind !== "series" || selectedSeason === "all" || message.episode_number && message.season_number === Number(selectedSeason)) &&
+    (!query || `${message.body} ${message.file_name} ${message.media_type || ""}`.toLocaleLowerCase().includes(query)) &&
+    (activeMode !== "manage" || managementFilter === "all" ||
+      (managementFilter === "review" ? Boolean(message.export_error) : message.export_status !== "written")));
+  const visibleMissingEpisodes = (hasMoreMessages || managementFilter !== "all" && activeMode === "manage" ? [] : missingEpisodes).filter((episode) => (selectedSeason === "all" || episode.season === Number(selectedSeason)) && (!query || `${episode.title} S${String(episode.season).padStart(2, "0")}E${String(episode.episode).padStart(2, "0")}`.toLocaleLowerCase().includes(query)));
+  const tmdbMatchesByMessage = new Map(tmdbMatches.map((match) => [match.message_id, match]));
   const orderedTopicItems = topicDetail?.library_kind === "series"
     ? [
-        ...visibleMessages.map((message) => ({ kind: "video" as const, season: message.season_number || 999, episode: message.episode_number || message.telegram_id, message })),
+        ...visibleMessages.map((message) => ({ kind: "video" as const, season: message.episode_number ? message.season_number ?? 0 : 999, episode: message.episode_number || message.telegram_id, message })),
         ...visibleMissingEpisodes.map((episode) => ({ kind: "missing" as const, season: episode.season, episode: episode.episode, missing: episode })),
       ].sort((left, right) => left.season - right.season || left.episode - right.episode || (left.kind === "video" ? -1 : 1))
     : visibleMessages.map((message) => ({ kind: "video" as const, season: 0, episode: 0, message }));
@@ -1370,9 +1550,10 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
       <header className="dashboard-header">
         <Brand />
         <nav className="top-nav" aria-label="Navegación principal">
-          <Link className={activeMode === "catalog" ? "active" : ""} to="/home" onClick={() => selectWorkspaceMode("catalog")}>
+          <Link className={(activeMode === "catalog" || activeMode === "manage") && !isLibrary ? "active" : ""} to="/home" onClick={() => selectWorkspaceMode("catalog")}>
             Inicio
           </Link>
+          <Link className={isLibrary ? "active" : ""} to="/library" onClick={() => selectWorkspaceMode("catalog")}>Biblioteca</Link>
           <Link className={activeMode === "mirror" ? "active" : ""} to="/mirror">Espejo</Link>
           <Link className={mode === "activity" ? "active" : ""} to="/activity">Actividad</Link>
         </nav>
@@ -1419,7 +1600,7 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
               <small>{profile.phone}</small>
             </span>
             <ChevronDown size={14}/>
-          </button>{accountOpen&&<section className="profile-popover"><header><span>{adminUsername.slice(0,2).toUpperCase()}</span><div><strong>{adminUsername}</strong><small>Cuenta administradora</small></div></header><div className="profile-telegram-row">{profile.avatar_url?<img src={profile.avatar_url} alt=""/>:<span>{initials}</span>}<div><strong>{profile.display_name}</strong><small>Telegram · {profile.phone}</small></div></div><Link to="/settings" onClick={()=>setAccountOpen(false)}><ShieldCheck size={15}/> Cuenta y seguridad</Link><button type="button" onClick={()=>void logoutAdmin()}><LogOut size={15}/> Cerrar sesión web</button></section>}</div>
+          </button>{accountOpen&&<section className="profile-popover"><header><span>{adminUsername.slice(0,2).toUpperCase()}</span><div><strong>{adminUsername}</strong><small>Cuenta administradora</small></div></header><div className="profile-telegram-row">{profile.avatar_url?<img src={profile.avatar_url} alt=""/>:<span>{initials}</span>}<div><strong>{profile.display_name}</strong><small>Telegram · {profile.phone}</small></div></div><Link to="/library" onClick={()=>{setAccountOpen(false);selectWorkspaceMode("catalog");}}><FolderOpen size={15}/> Biblioteca</Link><Link to="/home" onClick={()=>{setAccountOpen(false);selectWorkspaceMode("catalog");}}><Home size={15}/> Explorar grupos</Link><Link to="/settings" onClick={()=>setAccountOpen(false)}><ShieldCheck size={15}/> Cuenta y seguridad</Link><button type="button" onClick={()=>void logoutAdmin()}><LogOut size={15}/> Cerrar sesión web</button></section>}</div>
         </div>
       </header>
 
@@ -1454,7 +1635,7 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
       <section className="dashboard-intro">
         <div>
           <p className="eyebrow">{activeMode === "mirror" ? "SINCRONIZACIÓN" : activeMode === "settings" ? "ADMINISTRACIÓN" : activeMode === "activity" ? "TRAZABILIDAD" : activeMode === "manage" ? "GESTIÓN DE TOPICS" : videoId ? "VÍDEO DE TELEGRAM" : topicId ? "TOPIC DE TELEGRAM" : groupId ? "GRUPO DE TELEGRAM" : "CENTRO DE CONTROL"}</p>
-          <h1>{activeMode === "mirror" ? mode === "mirror-manage" ? "Gestionar espejo" : "Espejo" : activeMode === "settings" ? "Configuración" : activeMode === "activity" ? "Actividad" : mode === "import" ? "Revisar coincidencias" : activeMode === "manage" ? groupDetail?.title || "Cargando grupo…" : videoId ? videoDetail?.video.caption || videoDetail?.video.file_name || "Cargando vídeo…" : topicId ? topicDetail?.title || "Cargando topic…" : groupId ? groupDetail?.title || "Cargando grupo…" : `Hola, ${profile.first_name}.`}</h1>
+          <h1>{activeMode === "mirror" ? mode === "mirror-manage" ? "Gestionar espejo" : "Espejo" : activeMode === "settings" ? "Configuración" : activeMode === "activity" ? "Actividad" : mode === "replication-review" ? "Revisar réplica" : mode === "import" ? "Revisar coincidencias" : activeMode === "manage" ? groupDetail?.title || "Cargando grupo…" : videoId ? videoDetail?.video.caption || videoDetail?.video.file_name || "Cargando vídeo…" : topicId ? topicDetail?.title || "Cargando topic…" : groupId ? groupDetail?.title || "Cargando grupo…" : `Hola, ${profile.first_name}.`}</h1>
           <p>
             {activeMode === "mirror"
               ? mode === "mirror-manage" ? "Vincula topics externos con el catálogo principal." : "Supervisa los topics que se mantienen sincronizados en tiempo real."
@@ -1505,7 +1686,7 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
           </> : <>
           <Link
             className={activeMode === "catalog" ? "active" : ""}
-            to={topicId ? `/groups/${groupId}/topics/${topicId}` : groupId ? `/groups/${groupId}` : "/home"}
+            to={topicId ? `${catalogBase}/topics/${topicId}` : catalogBase}
             replace
             onClick={() => selectWorkspaceMode("catalog")}
             aria-label="Vista normal"
@@ -1513,7 +1694,7 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
           >
             <Home size={18} />
           </Link>
-          <Link className={activeMode === "manage" ? "active" : ""} to={topicId ? `/groups/${groupId}/topics/${topicId}/manage` : groupId ? `/groups/${groupId}/manage` : "/home"} replace onClick={() => selectWorkspaceMode("manage")} aria-label={topicId ? "Gestionar archivos" : groupId ? "Gestionar topics" : "Gestión"} title={topicId ? "Gestionar archivos" : groupId ? "Gestionar topics" : "Gestión"}><CheckSquare2 size={18} /></Link>
+          <Link className={activeMode === "manage" ? "active" : ""} to={topicId ? `${catalogBase}/topics/${topicId}/manage` : groupId || collectionId ? `${catalogBase}/manage` : "/home"} replace onClick={() => selectWorkspaceMode("manage")} aria-label={topicId ? "Gestionar archivos" : groupId ? "Gestionar topics" : "Gestión"} title={topicId ? "Gestionar archivos" : groupId ? "Gestionar topics" : "Gestión"}><CheckSquare2 size={18} /></Link>
           </>}
           <Link className={`mobile-settings-link${mode === "settings" ? " active" : ""}`} to="/settings" aria-label="Ajustes" title="Ajustes"><Settings size={18} /></Link>
           <button type="button" className="mobile-logout-link" onClick={() => { setLogoutError(""); setLogoutOpen(true); }} aria-label="Cerrar sesión" title="Cerrar sesión de Telegram"><LogOut className="logout-icon" size={18} /></button>
@@ -1536,7 +1717,7 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
         className={`dashboard-frame${videoId ? " video-frame" : ""}`}
         onScroll={updateScrollIndicator}
       >
-        {activeMode === "mirror" ? <MirrorPanel manage={mode === "mirror-manage"} /> : activeMode === "settings" ? (
+        {mode === "replication-review" && planId ? <ReplicationReview id={planId} /> : isLibrary && collectionId && !groupId ? <CollectionLibrary id={collectionId} manage={activeMode === "manage"} /> : activeMode === "mirror" ? <MirrorPanel manage={mode === "mirror-manage"} /> : activeMode === "settings" ? (
           <><AdminAccountPanel /><MediaSettingsPanel /></>
         ) : activeMode === "activity" ? (
           <section className="activity-view" aria-label="Actividad del sistema" onPointerDown={clearActivityFocus}>
@@ -1560,6 +1741,7 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
           <div>
             <p className="eyebrow">TELEGRAM</p>
             <h2>{mode === "import" ? "Revisión TMDB" : videoId ? "Reproductor" : topicId ? "Vídeos" : groupId ? "Topics" : "Tus grupos"}</h2>
+          {!videoId && topicDetail?.library_kind === "series" && <SeasonPicker dark={dark} value={selectedSeason} seasons={availableSeasons} onChange={setSelectedSeason} />}
           </div>
           {groupId && !videoId && <button className="catalog-summary" type="button" aria-label={topicId ? "Resumen del topic" : "Resumen del grupo"}>
             <span className="catalog-summary-main"><FileVideo size={14} /><strong>{topicId ? topicDetail ? topicDetail.video_count.toLocaleString("es") : "…" : topics.reduce((sum, topic) => sum + topic.video_count, 0).toLocaleString("es")} vídeos</strong></span>
@@ -1582,8 +1764,11 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
           </label>}
           </div>
         </section>
-        {activeMode === "manage" && mode !== "import" && groupId && (
-          <section className="selection-bar" aria-label="Selección de topics">
+        {activeMode === "manage" && mode !== "import" && groupId && !videoId && <div className="management-controls"><div className="management-filters" aria-label="Filtrar gestión">
+          {([ ["all", "Todos"], ["review", "Por revisar"], ["unexported", "Sin STRM"] ] as const).map(([value, label]) => <button type="button" key={value} aria-pressed={managementFilter === value} onClick={() => setManagementFilter(value)}>{label}</button>)}
+          {(selectingTopics || selectingVideos) && <small>Solo visibles cargados{hasMoreMessages ? " · siguen llegando archivos" : ""}.</small>}
+        </div>
+          <section className="selection-bar" aria-label={topicId ? "Gestión de archivos" : "Gestión de topics"}>
             <div className="media-kind" aria-label="Destino de biblioteca">
               <span>Destino automático</span>
             </div>
@@ -1592,29 +1777,37 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
               <ScanSearch size={14} /> <span className="mobile-action-label">{groupVideoScan?.status === "running" ? `${groupVideoScan.completed_topics}/${groupVideoScan.total_topics}` : "Escanear vídeos"}</span>
             </button>}
             {!topicId ? selectingTopics ? <>
-              <strong>{selectedTopicIds.size} seleccionados</strong>
-              <button onClick={() => setSelectedTopicIds(new Set(visibleTopics.map((topic) => topic.id)))} aria-label="Seleccionar todos" title="Todos"><CheckSquare2 size={14} /><span className="mobile-action-label">Todos</span></button>
+              <strong>{selectedTopicIds.size} {selectedTopicIds.size === 1 ? "seleccionado" : "seleccionados"}</strong>
+              <button onClick={() => setSelectedTopicIds(new Set(visibleTopics.map((topic) => topic.id)))} aria-label="Seleccionar los elementos visibles cargados" title="Seleccionar los elementos visibles cargados"><CheckSquare2 size={14} /><span className="mobile-action-label">Visibles</span></button>
               <button onClick={() => setSelectedTopicIds(new Set())} disabled={!selectedTopicIds.size} aria-label="Deseleccionar todos" title="Ninguno"><Square size={14} /><span className="mobile-action-label">Ninguno</span></button>
               <button onClick={() => { setSelectingTopics(false); setSelectedTopicIds(new Set()); }} aria-label="Cancelar selección" title="Cancelar"><X size={14} /> <span className="mobile-action-label">Cancelar</span></button>
-              {!isPrimaryGroup && <button disabled={!selectedTopicIds.size} onClick={() => openImportReview([...selectedTopicIds])} aria-label="Enviar topics al catálogo" title="Enviar topics al catálogo"><Send size={14} /><span className="mobile-action-label">Enviar topics</span></button>}
-              <button className="selection-primary" disabled={!selectedTopicIds.size} onClick={() => generateSTRM([...selectedTopicIds])} aria-label="Generar STRM" title="Generar STRM"><FileVideo size={14} /><span className="mobile-action-label">Generar STRM</span></button>
+              {<button disabled={!selectedTopicIds.size} onClick={() => openImportReview([...selectedTopicIds])} aria-label="Enviar topics al catálogo" title="Enviar topics al catálogo"><Send size={14} /><span className="mobile-action-label">Enviar topics</span></button>}
+              <button className="selection-primary" disabled={exportBusy || !selectedTopicIds.size} onClick={() => generateSTRM([...selectedTopicIds])} aria-label="Generar STRM" title="Generar STRM"><FileVideo size={14} /><span className="mobile-action-label">Generar STRM</span></button>
             </> : <button className="selection-primary" onClick={() => setSelectingTopics(true)} aria-label="Seleccionar topics" title="Seleccionar topics"><CheckSquare2 size={15} /> <span className="mobile-action-label">Seleccionar topics</span></button>
             : selectingVideos ? <>
-              <strong>{selectedMessageIds.size} seleccionados</strong>
-              <button onClick={() => setSelectedMessageIds(new Set(messages.map((message) => message.id)))} aria-label="Seleccionar todos" title="Todos"><CheckSquare2 size={14} /><span className="mobile-action-label">Todos</span></button>
+              <strong>{selectedMessageIds.size} {selectedMessageIds.size === 1 ? "seleccionado" : "seleccionados"}</strong>
+              <button onClick={() => setSelectedMessageIds(new Set(visibleMessages.map((message) => message.id)))} aria-label="Seleccionar los elementos visibles cargados" title="Seleccionar los elementos visibles cargados"><CheckSquare2 size={14} /><span className="mobile-action-label">Visibles</span></button>
               <button onClick={() => setSelectedMessageIds(new Set())} disabled={!selectedMessageIds.size} aria-label="Deseleccionar todos" title="Ninguno"><Square size={14} /><span className="mobile-action-label">Ninguno</span></button>
               <button onClick={() => { setSelectingVideos(false); setSelectedMessageIds(new Set()); }} aria-label="Cancelar selección" title="Cancelar"><X size={14} /> <span className="mobile-action-label">Cancelar</span></button>
-              {!isPrimaryGroup && <button disabled={!selectedMessageIds.size} onClick={() => openImportReview([topicId], { [topicId]: [...selectedMessageIds] })} aria-label="Enviar al catálogo" title="Enviar al catálogo"><Send size={14} /> <span className="mobile-action-label">Enviar al catálogo</span></button>}
-              <button className="selection-primary" disabled={!selectedMessageIds.size} onClick={() => generateSTRM([topicId], [...selectedMessageIds])} aria-label="Generar seleccionados" title="Generar seleccionados"><FileVideo size={14} /><span className="mobile-action-label">Generar seleccionados</span></button>
+              {<button disabled={!selectedMessageIds.size} onClick={() => openImportReview([topicId], { [topicId]: [...selectedMessageIds] })} aria-label="Asociar y enviar" title="Asociar y enviar"><Send size={14} /> <span className="mobile-action-label">Asociar y enviar</span></button>}
+              <FileTransferButton key={`${groupId}:${topicId}`} groupId={groupId!} topicId={topicId} selected={[...selectedMessageIds]} />
+              <button className="selection-primary" disabled={exportBusy || !selectedMessageIds.size} onClick={() => generateSTRM([topicId], [...selectedMessageIds])} aria-label="Generar seleccionados" title="Generar seleccionados"><FileVideo size={14} /><span className="mobile-action-label">Generar seleccionados</span></button>
             </> : <>
-              {isPrimaryGroup && topicDetail?.library_kind === "series" && <button onClick={openTopicMatch} aria-label="Revisar coincidencia TMDB" title="Revisar coincidencia TMDB"><ScanSearch size={15} /> <span className="mobile-action-label">Revisar TMDB</span></button>}
+              <button disabled={checkingTopic} onClick={() => void checkCurrentTopic()} aria-label="Comprobar este topic" title="Comprobar este topic">{checkingTopic ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />} <span className="mobile-action-label">Comprobar topic</span></button>
+              {(isPrimaryGroup || topicCorrection?.replicated) && topicDetail?.library_kind === "series" && <button onClick={openTopicMatch} aria-label="Revisar coincidencia TMDB" title="Revisar coincidencia TMDB"><ScanSearch size={15} /> <span className="mobile-action-label">Revisar TMDB</span></button>}
               <button onClick={() => setSelectingVideos(true)} aria-label="Seleccionar archivos" title="Seleccionar archivos"><CheckSquare2 size={15} /> <span className="mobile-action-label">Seleccionar archivos</span></button>
-              {!isPrimaryGroup && <button onClick={() => openImportReview([topicId])} aria-label="Enviar topic al catálogo" title="Enviar topic al catálogo"><Send size={14} /> <span className="mobile-action-label">Enviar topic al catálogo</span></button>}
-              <button className="selection-primary" onClick={() => generateSTRM([topicId])} aria-label="Generar topic completo" title="Generar topic completo"><FileVideo size={14} /><span className="mobile-action-label">Generar topic completo</span></button>
+              {<button onClick={() => openImportReview([topicId])} aria-label="Asociar y enviar serie" title="Asociar y enviar serie"><Send size={14} /> <span className="mobile-action-label">Asociar y enviar serie</span></button>}
+              <FileTransferButton key={`${groupId}:${topicId}`} groupId={groupId!} topicId={topicId} />
+              <button className="selection-primary" disabled={exportBusy} onClick={() => generateSTRM([topicId])} aria-label="Generar topic completo" title="Generar topic completo"><FileVideo size={14} /><span className="mobile-action-label">Generar topic completo</span></button>
             </>}
           </section>
-        )}
-        {activeMode === "manage" && exportState && <div className="export-feedback" role="status">{exportState}</div>}
+        </div>}
+        {activeMode === "manage" && topicId && topicCorrection && topicCorrection.status !== "idle" && <div className={`export-feedback${topicCorrection.status === "attention" ? " import-failed" : ""}`} role="status">
+          {topicCorrection.status === "pending" && <LoaderCircle className="spin" size={14}/>}
+          {topicCorrection.status === "completed" ? "Corrección de serie aplicada." : topicCorrection.status === "attention" ? "La corrección necesita revisión." : `Corrigiendo ${topicCorrection.phase || "serie"}${topicCorrection.total ? ` · ${topicCorrection.completed || 0}/${topicCorrection.total} pies` : ""}.`}
+          {topicCorrection.detail && <span>{topicCorrection.detail}</span>}
+        </div>}
+        {activeMode === "manage" && exportState && <div className={`export-feedback${operationHasError ? " import-failed" : ""}`} role={operationHasError ? "alert" : "status"} aria-live={operationHasError ? "assertive" : "polite"}>{(exportBusy || checkingTopic) && <LoaderCircle className="spin" size={14} />}{exportState} <Link to="/activity">Ver actividad</Link>{!exportBusy && !checkingTopic && <button type="button" className="feedback-dismiss" aria-label="Cerrar resultado" onClick={() => setExportState("")}><X size={13} /></button>}</div>}
         {activeMode === "manage" && topicId && importStatuses[topicId] && importStatuses[topicId].status !== "idle" && <div className={`export-feedback import-${importStatuses[topicId].status}`} role="status">
           {importStatuses[topicId].status === "running" || importStatuses[topicId].status === "pending" ? <><LoaderCircle className="spin" size={14} /> Enviando {importStatuses[topicId].completed || 0} de {importStatuses[topicId].requested || 0} a {importStatuses[topicId].destination_title || "tu catálogo"}</> : importStatuses[topicId].status === "completed" ? <><CheckCircle2 size={14} /> {importStatuses[topicId].completed || 0} archivos enviados correctamente a {importStatuses[topicId].destination_title}</> : <><CircleHelp size={14} /> Enviados {importStatuses[topicId].completed || 0} de {importStatuses[topicId].requested || 0} · {importStatuses[topicId].failed || 0} con error</>}
         </div>}
@@ -1622,7 +1815,7 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
         {mode === "import" ? (
           <section className="import-review" aria-label="Revisión de coincidencias TMDB">
             {importReviewState === "loading" ? <div className="topics-empty"><LoaderCircle className="spin" size={22} /><h2>Buscando coincidencias</h2><p>Consultando TMDB para preparar los topics seleccionados.</p></div> : <>
-              <div className="import-review-heading"><div><p className="eyebrow">ANTES DE ENVIAR</p><h3>{importPreview.length} {importPreview.length === 1 ? "topic preparado" : "topics preparados"}</h3><p>Selecciona la ficha correcta, el tipo de contenido y el destino. El título y los datos de TMDB se aplicarán al enviarlo.</p></div><button type="button" className="review-confirm" disabled={importReviewState === "sending" || importPreview.some((item) => !importChoices[item.topic_id] || !importItemCanConfirm(item) || (item.video_count === 0 && selectedMessagesForImport(item.topic_id).length === 0))} onClick={confirmReviewedImports}>{importReviewState === "sending" ? <LoaderCircle className="spin" size={15} /> : <Send size={15} />} Confirmar y enviar</button></div>
+              <div className="import-review-heading"><div><p className="eyebrow">ANTES DE ENVIAR</p><h3>{importPreview.length} {importPreview.length === 1 ? "topic preparado" : "topics preparados"}</h3><p>Selecciona la ficha correcta, el tipo de contenido y el destino. El título y los datos de TMDB se aplicarán al enviarlo.</p></div><button type="button" className="review-confirm" disabled={importReviewState === "sending" || importPreview.some((item) => !importChoices[item.topic_id] || !resolvedImportGroup(item) || importTopicsLoading[resolvedImportGroup(item)] || !!importTopicsErrors[resolvedImportGroup(item)] || !importItemCanConfirm(item) || (item.video_count === 0 && selectedMessagesForImport(item.topic_id).length === 0))} onClick={confirmReviewedImports}>{importReviewState === "sending" ? <LoaderCircle className="spin" size={15} /> : <Send size={15} />} Confirmar y enviar</button></div>
               <div className="import-review-list">{importPreview.map((item) => <article className="import-review-item" key={item.topic_id}>
                 <header><div><strong>{item.source_title}</strong><small>{selectedMessagesForImport(item.topic_id).length > 0 && item.preparation_status !== "ready" ? `${selectedMessagesForImport(item.topic_id).length} archivo seleccionado · el resto se indexa en segundo plano` : item.preparation_status === "running" || item.preparation_status === "idle" ? <><LoaderCircle className="spin" size={12} /> Cargando archivos desde Telegram…</> : item.preparation_status === "failed" ? "No se pudo cargar el historial" : `${item.video_count} vídeos encontrados`}</small></div><span>{item.preparation_status === "ready" && importChoices[item.topic_id] ? "Coincidencia seleccionada" : selectedMessagesForImport(item.topic_id).length > 0 ? "Listo para enviar" : item.preparation_status === "failed" ? "Error de preparación" : "Preparando topic"}</span></header>
                 <div className="import-review-options">
@@ -1630,8 +1823,15 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
                     <button type="button" className={(importMediaTypes[item.topic_id] || item.media_type || "tv") === "tv" ? "selected" : ""} onClick={() => void changeImportMediaType(item.topic_id, "tv")}>Serie</button>
                     <button type="button" className={(importMediaTypes[item.topic_id] || item.media_type || "tv") === "movie" ? "selected" : ""} onClick={() => void changeImportMediaType(item.topic_id, "movie")}>Película</button>
                   </div>
-                  <label className="import-destination"><span>Enviar a</span><select value={importDestinations[item.topic_id] || ""} onChange={(event) => setImportDestinations((current) => ({ ...current, [item.topic_id]: event.target.value }))}><option value="">Crear topic con el título de TMDB</option>{(item.destinations || []).filter((destination) => (importMediaTypes[item.topic_id] || item.media_type || "tv") === "movie" ? destination.library_kind === "movie_collection" || /pel[ií]culas/i.test(destination.title) : destination.library_kind !== "movie_collection").map((destination) => <option key={destination.id} value={destination.id}>{destination.title}{destination.library_kind === "movie_collection" ? " · Películas" : destination.library_kind === "series" ? " · Series" : ""}</option>)}</select></label>
+                  <div className="import-destination-fields">
+                    <div className="import-destination"><span>Destino de este envío</span><PillSelect label="Destino de este envío" value={importTargetScopes[item.topic_id] || "catalogue"} options={[{value:"catalogue",label:"Biblioteca · destino principal"},{value:"external",label:"Otro grupo"}]} onChange={value=>{setImportTargetScopes(current=>({...current,[item.topic_id]:value}));setImportDestinationGroups(current=>{const next={...current};delete next[item.topic_id];return next;});setImportDestinations(current=>({...current,[item.topic_id]:""}));setImportGroupSearch(current=>({...current,[item.topic_id]:""}));}} /></div>
+                    {importTargetScopes[item.topic_id]==="external"&&<input type="search" aria-label="Buscar grupo destino" placeholder="Buscar otro grupo…" value={importGroupSearch[item.topic_id] || ""} onChange={event=>setImportGroupSearch(current=>({...current,[item.topic_id]:event.target.value}))} />}
+                    <div className="import-destination"><span>Grupo destino</span><PillSelect label="Grupo destino" value={resolvedImportGroup(item)} options={[{value: "", label: "Selecciona un grupo"}, ...(item.destination_groups || []).filter(group=>(importTargetScopes[item.topic_id]==="external" || group.catalogue) && (group.id===resolvedImportGroup(item) || group.title.toLocaleLowerCase().includes((importGroupSearch[item.topic_id] || "").toLocaleLowerCase()))).map(group => ({value: group.id, label: group.title}))]} onChange={value => {setImportDestinationGroups(current => ({...current, [item.topic_id]: value})); setImportDestinations(current => ({...current, [item.topic_id]: ""})); setImportDestinationSearch(current => ({...current, [item.topic_id]: ""})); void loadImportTargetTopics(value);}} /></div>
+                    <div className="import-destination"><span>Topic destino</span><PillSelect label="Topic destino" disabled={!resolvedImportGroup(item) || importTopicsLoading[resolvedImportGroup(item)]} value={importDestinations[item.topic_id] || ""} options={[{value: "", label: importTopicsLoading[resolvedImportGroup(item)] ? "Cargando topics…" : "Crear topic con el título de TMDB"}, ...importTopicOptions(item).filter(destination => destination.id !== item.topic_id && destination.group_id === resolvedImportGroup(item) && (destination.id === importDestinations[item.topic_id] || destination.title.toLocaleLowerCase().includes((importDestinationSearch[item.topic_id] || "").toLocaleLowerCase()))).map(destination => ({value: destination.id, label: destination.title}))]} onChange={value => {setImportDestinations(current => ({...current, [item.topic_id]: value}));}} /></div>
+                    <input type="search" aria-label="Filtrar topics de destino" placeholder="Buscar topic existente…" disabled={!resolvedImportGroup(item)} value={importDestinationSearch[item.topic_id] || ""} onChange={event => setImportDestinationSearch(current => ({...current, [item.topic_id]: event.target.value}))} />
+                  </div>
                 </div>
+                {importTopicsErrors[resolvedImportGroup(item)]&&<p role="alert" className="jobs-error">{importTopicsErrors[resolvedImportGroup(item)]}<button type="button" onClick={()=>void loadImportTargetTopics(resolvedImportGroup(item))}>Reintentar</button></p>}
                 <div className="import-match-search"><Search size={15} /><input value={importQueries[item.topic_id] || ""} onChange={(event) => setImportQueries((current) => ({ ...current, [item.topic_id]: event.target.value }))} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void searchImportMatch(item.topic_id); } }} aria-label={`Buscar otra coincidencia para ${item.source_title}`} /><button type="button" onClick={() => searchImportMatch(item.topic_id)} disabled={importSearching === item.topic_id}>{importSearching === item.topic_id ? <LoaderCircle className="spin" size={14} /> : "Buscar otra"}</button></div>
                 <div className="import-candidates">{item.candidates.length ? item.candidates.map((candidate) => {
                   const selected = importChoices[item.topic_id] === candidate.id;
@@ -1649,7 +1849,7 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
           videoState === "loading" ? (
             <section className="topics-empty"><div className="empty-icon"><FileVideo size={22} /></div><h2>Cargando información</h2></section>
           ) : videoState === "missing" || !videoDetail ? (
-            <section className="topics-empty"><div className="empty-icon"><FileVideo size={22} /></div><h2>Este vídeo no está disponible</h2><Link className="back-link" to={`/groups/${groupId}/topics/${topicId}`}><ArrowLeft size={15} /> Volver al topic</Link></section>
+            <section className="topics-empty"><div className="empty-icon"><FileVideo size={22} /></div><h2>Este vídeo no está disponible</h2><Link className="back-link" to={`${catalogBase}/topics/${topicId}`}><ArrowLeft size={15} /> Volver al topic</Link></section>
           ) : (
             <section className="video-detail">
               <div
@@ -1712,12 +1912,12 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
             <section className="topics-empty">
               <div className="empty-icon"><FileVideo size={22} /></div>
               <h2>Este topic ya no está disponible</h2>
-              <Link className="back-link" to={`/groups/${groupId}`}><ArrowLeft size={15} /> Volver al grupo</Link>
+              <Link className="back-link" to={catalogBase}><ArrowLeft size={15} /> Volver al grupo</Link>
             </section>
-          ) : messageState === "loading" || (topicDetail?.library_kind === "series" && hasMoreMessages) ? (
+          ) : messageState === "loading" ? (
             <section className="topics-empty"><div className="empty-icon"><FileVideo size={22} /></div><h2>Cargando vídeos</h2><p>Consultando Telegram y preparando el catálogo del topic.</p></section>
-          ) : messages.length || missingEpisodes.length ? (
-            <section className="message-list" aria-label="Mensajes del topic">
+          ) : visibleMessages.length || visibleMissingEpisodes.length || hasMoreMessages ? (
+            <section className={`message-list${activeMode === "manage" && isPrimaryGroup && topicDetail?.library_kind === "movie_collection" ? " movie-library-management" : ""}`} aria-label="Mensajes del topic">
               {orderedTopicItems.map((item) => {
                 if (item.kind === "missing") {
                   const episode = item.missing;
@@ -1732,25 +1932,32 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
                 }
                 const message = item.message;
                 const selected = selectedMessageIds.has(message.id);
-                const tmdbMatch = tmdbMatches.find((match) => match.message_id === message.id);
+                const tmdbMatch = tmdbMatchesByMessage.get(message.id);
+                const movieManagement = activeMode === "manage" && isPrimaryGroup && topicDetail?.library_kind === "movie_collection";
+                const movieStatus = message.export_status === "written" ? "written" : !tmdbMatch ? "review" : message.export_status === "error" || message.export_error ? "error" : "pending";
+                const movieStatusLabel = movieStatus === "written" ? "Generado" : movieStatus === "review" ? "Revisar" : movieStatus === "error" ? message.export_error?.includes("ya tiene un STRM") ? "Duplicado" : "Error" : "Pendiente";
                 const content = <>
                   <span className={`message-poster${tmdbMatch?.poster_path ? " has-poster" : ""}`}>{tmdbMatch?.poster_path ? <img src={`${tmdbImageBase}${tmdbMatch.poster_path}`} alt={`Póster de ${tmdbMatch.title}`} loading="lazy" /> : <FileVideo size={24} />}</span>
                   <div className="message-copy">
-                    <p>{message.body || message.file_name || "Vídeo sin título"}</p>
-                    {message.body && message.file_name && <span className="message-filename">{message.file_name}</span>}
+                    <p>{activeMode === "manage" && !selectingVideos && (message.export_error || isPrimaryGroup && topicDetail?.library_kind === "movie_collection") ? <Link className="managed-video-title" to={`${catalogBase}/topics/${topicId}/videos/${message.id}`}>{message.body || message.file_name || "Vídeo sin título"}</Link> : message.body || message.file_name || "Vídeo sin título"}</p>
+                    {(movieManagement || message.body && message.file_name) && <span className="message-filename">{message.body && message.file_name ? message.file_name : ""}</span>}
                     <small>{new Intl.DateTimeFormat("es", { dateStyle: "medium", timeStyle: "short" }).format(new Date(message.sent_at))}{message.edited_at ? " · editado" : ""}</small>
-                    {tmdbMatch && <span className="tmdb-match-badge" title={`TMDB #${tmdbMatch.tmdb_id}`}><CheckCircle2 size={12} /> {tmdbMatch.title}{tmdbMatch.release_date ? ` (${tmdbMatch.release_date.slice(0, 4)})` : ""}</span>}
-                    {activeMode === "manage" && message.export_error && <button type="button" className="tmdb-match-badge export-error-badge resolution-trigger" title={message.export_error} onClick={() => topicDetail?.library_kind === "movie_collection" ? openMovieMatch(message) : void openEpisodeResolution(message)}><CircleHelp size={12} /> {topicDetail?.library_kind === "movie_collection" ? "Revisar película" : "Resolver episodio"}</button>}
+                    {tmdbMatch && !movieManagement && <span className="tmdb-match-badge" title={`TMDB #${tmdbMatch.tmdb_id}`}><CheckCircle2 size={12} /> {tmdbMatch.title}{tmdbMatch.release_date ? ` (${tmdbMatch.release_date.slice(0, 4)})` : ""}</span>}
+                    {activeMode === "manage" && isPrimaryGroup && !movieManagement && <span className={`file-export-state ${message.export_status || "pending"}`} title={message.export_error || undefined}>{message.export_status === "written" ? "STRM creado" : message.export_error ? "Requiere revisión" : "STRM pendiente"}</span>}
+                    {movieManagement && (selectingVideos ? <span className={`movie-status-pill ${movieStatus}`}><span aria-hidden="true">{movieStatus === "written" ? <CheckCircle2 size={13} /> : <CircleHelp size={13} />}</span>{movieStatusLabel}</span> : <button type="button" className={`movie-status-pill ${movieStatus}`} aria-label={`${movieStatusLabel}: revisar estado de ${tmdbMatch?.title || message.file_name || "esta película"}`} title={message.export_error || "Abrir revisión de coincidencia TMDB"} onClick={() => movieStatus === "review" || movieStatus === "written" ? openMovieMatch(message) : setExportReviewTarget(message)}>{movieStatus === "written" ? <CheckCircle2 size={13} /> : movieStatus === "pending" ? <LoaderCircle size={13} /> : <CircleHelp size={13} />}{movieStatusLabel}</button>)}
+                    {activeMode === "manage" && !movieManagement && !selectingVideos && message.export_error && <button type="button" className="tmdb-match-badge export-error-badge resolution-trigger" title={message.export_error} onClick={() => setExportReviewTarget(message)}>{topicDetail?.library_kind === "movie_collection" ? "Revisar película" : "Resolver episodio"}</button>}
                   </div>
                   {activeMode === "manage" && selectingVideos && <span className={`topic-check${selected ? " selected" : ""}`}>{selected ? <CheckSquare2 size={18} /> : <Square size={18} />}</span>}
                 </>;
-                return activeMode === "manage" && selectingVideos ? <button key={message.id} type="button" className={`message-card selectable${selected ? " selected" : ""}`} aria-pressed={selected} onClick={() => setSelectedMessageIds((current) => { const next = new Set(current); selected ? next.delete(message.id) : next.add(message.id); return next; })}>{content}</button> : activeMode === "manage" && message.export_error ? <article key={message.id} className="message-card unresolved-message-card">{content}</article> : <Link key={message.id} className="message-card" to={`/groups/${groupId}/topics/${topicId}/videos/${message.id}`}>{content}</Link>;
+                return activeMode === "manage" && selectingVideos ? <button key={message.id} type="button" className={`message-card selectable${selected ? " selected" : ""}`} aria-pressed={selected} onClick={() => setSelectedMessageIds((current) => { const next = new Set(current); selected ? next.delete(message.id) : next.add(message.id); return next; })}>{content}</button> : activeMode === "manage" && (message.export_error || isPrimaryGroup && topicDetail?.library_kind === "movie_collection") ? <article key={message.id} className="message-card unresolved-message-card">{content}</article> : <Link key={message.id} className="message-card" to={`${catalogBase}/topics/${topicId}/videos/${message.id}`}>{content}</Link>;
               })}
-              {hasMoreMessages && !query && <div className="load-more" aria-live="polite"><LoaderCircle className="spin" size={15} /> Cargando el catálogo completo…</div>}
+              {hasMoreMessages && <div className="load-more" aria-live="polite">{paginationError ? <>No se pudo cargar el resto. <button type="button" onClick={loadMoreMessages}>Reintentar carga</button></> : <><LoaderCircle className="spin" size={15} /> Cargando más archivos…</>}</div>}
             </section>
           ) : (
-            <section className="topics-empty"><div className="empty-icon"><FileVideo size={22} /></div><h2>{query ? "No encontramos ese vídeo" : "Este topic todavía no tiene vídeos"}</h2><Link className="back-link" to={`/groups/${groupId}`}><ArrowLeft size={15} /> Volver al grupo</Link></section>
+            <section className="topics-empty"><div className="empty-icon"><FileVideo size={22} /></div><h2>{managementFilter !== "all" && activeMode === "manage" ? "No hay archivos con este filtro" : query ? "No encontramos ese vídeo" : "Este topic todavía no tiene vídeos"}</h2><Link className="back-link" to={catalogBase}><ArrowLeft size={15} /> Volver al grupo</Link></section>
           )
+        ) : isLibrary && !groupId ? (
+          <section className="topics-empty"><div className="empty-icon"><FolderOpen size={22} /></div><h2>Tu biblioteca necesita un grupo principal</h2><p>Selecciona el foro donde guardarás tus películas y series.</p><Link className="back-link" to="/settings">Configurar grupo principal</Link></section>
         ) : groupId ? (
           catalogState === "missing" ? (
             <section className="topics-empty">
@@ -1791,24 +1998,24 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
                 return activeMode === "manage" && selectingTopics ? (
                   <button key={topic.id} type="button" className={`group-card topic-card selectable${artwork ? " has-artwork" : ""}${selected ? " selected" : ""}`} aria-pressed={selected} onClick={() => setSelectedTopicIds((current) => { const next = new Set(current); selected ? next.delete(topic.id) : next.add(topic.id); return next; })}>{content}</button>
                 ) : activeMode === "manage" ? (
-                  <Link key={topic.id} className={`group-card topic-card${artwork ? " has-artwork" : ""}`} to={`/groups/${groupId}/topics/${topic.id}/manage`}>{content}</Link>
+                  <Link key={topic.id} className={`group-card topic-card${artwork ? " has-artwork" : ""}`} to={`${catalogBase}/topics/${topic.id}/manage`}>{content}</Link>
                 ) : (
-                  <Link key={topic.id} className={`group-card topic-card${artwork ? " has-artwork" : ""}`} to={`/groups/${groupId}/topics/${topic.id}`}>{content}</Link>
+                  <Link key={topic.id} className={`group-card topic-card${artwork ? " has-artwork" : ""}`} to={`${catalogBase}/topics/${topic.id}`}>{content}</Link>
                 );
               })}
             </section>
           ) : (
             <section className="topics-empty">
               <div className="empty-icon"><MessageCircle size={22} /></div>
-              <h2>{topics.length ? "No encontramos ese topic" : groupDetail?.forum ? "Este foro no tiene topics visibles" : "Este grupo no utiliza topics"}</h2>
-              <p>{topics.length ? "Prueba con otro nombre." : "Puedes volver al inicio para elegir otro grupo."}</p>
+              <h2>{managementFilter !== "all" && activeMode === "manage" ? "No hay topics con este filtro" : topics.length ? "No encontramos ese topic" : groupDetail?.forum ? "Este foro no tiene topics visibles" : "Este grupo no utiliza topics"}</h2>
+              <p>{managementFilter !== "all" && activeMode === "manage" ? "Prueba otro filtro o vuelve a Todos." : topics.length ? "Prueba con otro nombre." : "Puedes volver al inicio para elegir otro grupo."}</p>
               <Link className="back-link" to="/home"><ArrowLeft size={15} /> Volver a tus grupos</Link>
             </section>
           )
         ) : visibleGroups.length ? (
-          <section className="groups-grid" aria-label="Grupos de Telegram">
+          <> {activeMode === "manage" && <ReplicationSourcePicker groups={visibleGroups} selected={selectedSourceGroups} selecting={selectingSourceGroups} onSelected={setSelectedSourceGroups} onSelecting={setSelectingSourceGroups} />}<section className="groups-grid" aria-label="Grupos de Telegram">
             {visibleGroups.map((group) => (
-              <Link key={group.id} className="group-card" to={activeMode === "manage" ? `/groups/${group.id}/manage` : `/groups/${group.id}`}>
+              <Link key={group.id} className={`group-card${selectingSourceGroups && selectedSourceGroups.includes(group.id) ? " selected" : ""}`} aria-label={selectingSourceGroups ? `${selectedSourceGroups.includes(group.id) ? "Deseleccionar" : "Seleccionar"} ${group.title}` : undefined} onClick={event => { if (activeMode === "manage" && selectingSourceGroups) { event.preventDefault(); if (group.forum && !group.active && !group.managed) setSelectedSourceGroups(current => current.includes(group.id) ? current.filter(id => id !== group.id) : [...current, group.id]); } }} to={activeMode === "manage" ? `/groups/${group.id}/manage` : `/groups/${group.id}`}>
                 <span className="group-mark">
                   <FolderOpen size={19} />
                 </span>
@@ -1824,7 +2031,7 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
                 </span>
               </Link>
             ))}
-          </section>
+          </section></>
         ) : (
           <section className="topics-empty">
             <div className="empty-icon">
@@ -1876,6 +2083,16 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
         </span>
       )}
       </div>
+      {exportReviewTarget && <div className="episode-resolution-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setExportReviewTarget(undefined); }}>
+        <section ref={exportReviewRef} className="episode-resolution" role="dialog" aria-modal="true" aria-labelledby="export-review-title">
+          <header><div><p className="eyebrow">ESTADO DEL ARCHIVO</p><h2 id="export-review-title">Revisar generación STRM</h2></div><button type="button" className="tmdb-close" aria-label="Cerrar" onClick={() => setExportReviewTarget(undefined)}><X size={17} /></button></header>
+          <div className="resolution-source"><span className="message-poster"><FileVideo size={22} /></span><div><strong>{exportReviewTarget.file_name || "Archivo sin nombre"}</strong><small>{exportReviewTarget.body}</small></div></div>
+          <p className="export-review-reason">{exportReviewTarget.export_error || "El archivo está en el catálogo, pero todavía no tiene un STRM generado."}</p>
+          {topicDetail?.library_kind === "series" && <div className="resolution-preview"><small>Identificación del episodio</small><strong>{exportReviewTarget.episode_number ? `S${String(exportReviewTarget.season_number ?? 0).padStart(2, "0")}E${String(exportReviewTarget.episode_number).padStart(2, "0")}${(exportReviewTarget.episode_end_number || 0) > exportReviewTarget.episode_number ? `-E${String(exportReviewTarget.episode_end_number).padStart(2, "0")}` : ""}` : "No se detectaron temporada y episodio"}</strong><small>{exportReviewTarget.episode_source === "filename" ? "Detectado en el nombre del archivo" : exportReviewTarget.episode_source === "caption" ? "Detectado en el pie de Telegram" : exportReviewTarget.episode_number ? "Identificación guardada en el catálogo" : "Revisa el nombre o el pie del archivo, o asígnalo manualmente."}</small></div>}
+          {exportReviewTarget.export_error?.includes("ya tiene un STRM") && topicDetail?.library_kind === "movie_collection" && <p>Para conservar varias versiones, elige el formato Jellyfin en Configuración y vuelve a generar estos archivos. No se borrará ningún vídeo de Telegram.</p>}
+          <footer><button type="button" className="resolution-cancel" onClick={() => { const target = exportReviewTarget; setExportReviewTarget(undefined); if (topicDetail?.library_kind === "movie_collection" && target.export_error?.includes("ya tiene un STRM")) { navigate("/settings"); return; } topicDetail?.library_kind === "movie_collection" ? openMovieMatch(target) : void openEpisodeResolution(target); }}>{topicDetail?.library_kind === "movie_collection" ? exportReviewTarget.export_error?.includes("ya tiene un STRM") ? "Configurar formatos" : "Revisar coincidencia" : "Asignar episodio"}</button><button type="button" className="resolution-save" disabled={exportBusy} onClick={() => { const target = exportReviewTarget; setExportReviewTarget(undefined); if (topicId) void generateSTRM([topicId], [target.id]); }}><RotateCcw size={15} /> Generar de nuevo</button></footer>
+        </section>
+      </div>}
       {resolutionTarget && (
         <div className="episode-resolution-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setResolutionTarget(undefined); }}>
           <section className="episode-resolution" role="dialog" aria-modal="true" aria-labelledby="episode-resolution-title">
@@ -1883,6 +2100,7 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
               <div><p className="eyebrow">RESOLUCIÓN MANUAL</p><h2 id="episode-resolution-title">Asignar episodio</h2></div>
               <button type="button" className="tmdb-close" aria-label="Cerrar" onClick={() => setResolutionTarget(undefined)}><X size={17} /></button>
             </header>
+            <div className="resolution-body">
             <div className="resolution-source"><span className="message-poster"><FileVideo size={22} /></span><div><strong>{resolutionTarget.body || resolutionTarget.file_name}</strong><small>{resolutionTarget.file_name}</small></div></div>
             {resolutionInfo && <div className="resolution-series"><CheckCircle2 size={16} /><span><small>Serie confirmada en TMDB</small><strong>{resolutionInfo.series.title}</strong></span><b>#{resolutionInfo.series.tmdb_id}</b></div>}
             <div className="resolution-controls">
@@ -1898,6 +2116,7 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
             </div>}
             {resolutionInfo && resolutionEpisode > 0 && <div className="resolution-preview"><small>Vista previa</small><strong>{resolutionInfo.series.title} · S{String(resolutionSeason).padStart(2, "0")}E{String(resolutionEpisode).padStart(2, "0")}</strong></div>}
             {resolutionError && <p className="resolution-error" role="alert">{resolutionError}</p>}
+            </div>
             <footer><button type="button" className="resolution-cancel" onClick={() => setResolutionTarget(undefined)}>Cancelar</button><button type="button" className="resolution-save" disabled={!resolutionInfo || resolutionEpisode < 1 || resolutionState !== "idle"} onClick={() => void saveEpisodeResolution()}>{resolutionState === "saving" ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />} Confirmar y generar</button></footer>
           </section>
         </div>
@@ -1906,8 +2125,8 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
         <div className="episode-resolution-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setTopicMatchOpen(false); }}>
           <section className="episode-resolution topic-match-dialog" role="dialog" aria-modal="true" aria-labelledby="topic-match-title">
             <header><div><p className="eyebrow">COINCIDENCIA MANUAL</p><h2 id="topic-match-title">Buscar serie en TMDB</h2></div><button type="button" className="tmdb-close" aria-label="Cerrar" onClick={() => setTopicMatchOpen(false)}><X size={17} /></button></header>
-            <p className="tmdb-hint">Elige la ficha correcta para recuperar la portada, el año y los datos usados al generar la biblioteca.</p>
-            <div className="tmdb-search-row"><label className="group-search"><Search size={16} /><input value={topicMatchQuery} onChange={(event) => setTopicMatchQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void searchTopicMatch(); } }} autoFocus aria-label="Título de la serie" /></label><button type="button" disabled={topicMatchState !== "idle"} onClick={() => void searchTopicMatch()}>{topicMatchState === "searching" ? <LoaderCircle className="spin" size={15} /> : <Search size={15} />} Buscar</button></div>
+            <p className="tmdb-hint">Elige la serie correcta. En un topic replicado se actualizarán su nombre, el póster y enlace, los pies de los archivos y la biblioteca STRM, sin reenviar vídeos.</p>
+            <div className="tmdb-search-row"><label className="group-search"><Search size={16} /><input value={topicMatchQuery} onChange={(event) => setTopicMatchQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void searchTopicMatch(); } }} autoFocus aria-label="Título o ID de TMDB de la serie" placeholder="Título o ID de TMDB" /></label><button type="button" disabled={topicMatchState !== "idle"} onClick={() => void searchTopicMatch()}>{topicMatchState === "searching" ? <LoaderCircle className="spin" size={15} /> : <Search size={15} />} Buscar</button></div>
             {topicMatchError && <p className="tmdb-error" role="alert">{topicMatchError}</p>}
             <div className="tmdb-results">{topicMatchResults.map((candidate) => <article className="tmdb-result" key={candidate.id}>{candidate.poster_path ? <img src={`${tmdbImageBase}${candidate.poster_path}`} alt="" /> : <span className="tmdb-poster-empty"><FileVideo size={20} /></span>}<div><strong>{candidate.title}</strong><small>{candidate.release_date?.slice(0, 4) || "Año no disponible"}{candidate.original_title && candidate.original_title !== candidate.title ? ` · ${candidate.original_title}` : ""}</small><p>{candidate.overview || "Sin descripción disponible."}</p></div><button type="button" disabled={topicMatchState !== "idle"} onClick={() => void confirmTopicMatch(candidate)}>{topicMatchState === "saving" ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} Asociar</button></article>)}</div>
           </section>
@@ -1919,12 +2138,13 @@ export function DashboardPage({ mode = "catalog" }: { mode?: "catalog" | "settin
             <header><div><p className="eyebrow">REVISIÓN DE PELÍCULA</p><h2 id="movie-match-title">Confirmar coincidencia en TMDB</h2></div><button type="button" className="tmdb-close" aria-label="Cerrar" onClick={() => setMovieMatchTarget(undefined)}><X size={17} /></button></header>
             <div className="resolution-source"><span className="message-poster"><FileVideo size={22} /></span><div><strong>{movieMatchTarget.body || movieMatchTarget.file_name}</strong><small>{movieMatchTarget.file_name}</small></div></div>
             <p className="tmdb-hint">Confirma la ficha correcta. El título en España y su año formarán tanto la carpeta como el archivo STRM.</p>
-            <div className="tmdb-search-row"><label className="group-search"><Search size={16} /><input value={movieMatchQuery} onChange={(event) => setMovieMatchQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void searchMovieMatch(); } }} autoFocus aria-label="Título de la película" /></label><button type="button" disabled={movieMatchState !== "idle"} onClick={() => void searchMovieMatch()}>{movieMatchState === "searching" ? <LoaderCircle className="spin" size={15} /> : <Search size={15} />} Buscar</button></div>
+            <div className="tmdb-search-row"><label className="group-search"><Search size={16} /><input value={movieMatchQuery} onChange={(event) => setMovieMatchQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void searchMovieMatch(); } }} autoFocus aria-label="Título o ID de TMDB de la película" placeholder="Título o ID de TMDB" /></label><button type="button" disabled={movieMatchState !== "idle"} onClick={() => void searchMovieMatch()}>{movieMatchState === "searching" ? <LoaderCircle className="spin" size={15} /> : <Search size={15} />} Buscar</button></div>
             {movieMatchError && <p className="tmdb-error" role="alert">{movieMatchError}</p>}
             <div className="tmdb-results">{movieMatchResults.map((candidate) => <article className="tmdb-result" key={candidate.id}>{candidate.poster_path ? <img src={`${tmdbImageBase}${candidate.poster_path}`} alt="" /> : <span className="tmdb-poster-empty"><FileVideo size={20} /></span>}<div><strong>{candidate.title}</strong><small>{candidate.release_date?.slice(0, 4) || "Año no disponible"}{candidate.original_title && candidate.original_title !== candidate.title ? ` · ${candidate.original_title}` : ""}</small><p>{candidate.overview || "Sin descripción disponible."}</p></div><button type="button" disabled={movieMatchState !== "idle"} onClick={() => void confirmMovieMatch(candidate)}>{movieMatchState === "saving" ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />} Asociar</button></article>)}</div>
           </section>
         </div>
       )}
+      <AmbientMode />
     </div>
   );
 }

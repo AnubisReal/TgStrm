@@ -88,15 +88,34 @@ FROM combined ORDER BY score DESC, matched DESC, title LIMIT $2`, query, limit+1
 	}
 	defer rows.Close()
 	items := make([]catalogSearchResult, 0, limit)
-	primaryGroupID := ""
-	_ = a.db.QueryRowContext(r.Context(), `SELECT value #>> '{}' FROM tgstrm.settings WHERE key='active_chat_id'`).Scan(&primaryGroupID)
+	managedGroups := map[string]bool{}
+	managedRows, managedErr := a.db.QueryContext(r.Context(), `SELECT id::text FROM tgstrm.managed_catalog_chats WHERE is_active`)
+	if managedErr != nil {
+		fail(w, 503, "library_unavailable", "No se pudo comprobar el destino de biblioteca.")
+		return
+	}
+	for managedRows.Next() {
+		var id string
+		if managedErr = managedRows.Scan(&id); managedErr != nil {
+			break
+		}
+		managedGroups[id] = true
+	}
+	if managedErr == nil {
+		managedErr = managedRows.Err()
+	}
+	managedRows.Close()
+	if managedErr != nil {
+		fail(w, 503, "library_unavailable", "No se pudo comprobar el destino de biblioteca.")
+		return
+	}
 	for rows.Next() {
 		var item catalogSearchResult
 		if err = rows.Scan(&item.Kind, &item.ID, &item.GroupID, &item.TopicID, &item.VideoID, &item.Title, &item.Detail, &item.GroupTitle, &item.TopicTitle, &item.MediaType, &item.OfficialTitle, &item.OriginalTitle, &item.Year, &item.PosterPath, &item.Matched, &item.Exported, &item.ByteSize, &item.Score); err != nil {
 			fail(w, 500, "search_failed", "No se pudo leer el resultado.")
 			return
 		}
-		item.Importable = item.Kind == "file" && item.TopicID != "" && item.GroupID != "" && item.GroupID != primaryGroupID
+		item.Importable = item.Kind == "file" && item.TopicID != "" && item.GroupID != "" && !managedGroups[item.GroupID]
 		items = append(items, item)
 	}
 	if err = rows.Err(); err != nil {

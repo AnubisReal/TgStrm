@@ -47,10 +47,28 @@ func importEpisodeOrder(value string) (season, episode int, ok bool) {
 	return season, episode, seasonErr == nil && episodeErr == nil && season >= 0 && episode > 0
 }
 
+var filenameImportEpisodePattern = regexp.MustCompile(`(?i)(?:^|[^[:alnum:]])(?:T|S)(\d{1,2})[ ._-]+(?:E)?(\d{1,3})(?:[^[:digit:]]|$)`)
+
+func documentEpisodeOrder(d importDocument) (int, int, bool) {
+	if season, episode, ok := importEpisodeOrder(d.caption); ok {
+		return season, episode, true
+	}
+	if season, episode, ok := importEpisodeOrder(d.fileName); ok {
+		return season, episode, true
+	}
+	match := filenameImportEpisodePattern.FindStringSubmatch(d.fileName)
+	if len(match) != 3 {
+		return 0, 0, false
+	}
+	season, e1 := strconv.Atoi(match[1])
+	episode, e2 := strconv.Atoi(match[2])
+	return season, episode, e1 == nil && e2 == nil && episode > 0
+}
+
 func sortImportDocuments(docs []importDocument) {
 	sort.SliceStable(docs, func(i, j int) bool {
-		leftSeason, leftEpisode, leftOK := importEpisodeOrder(docs[i].caption)
-		rightSeason, rightEpisode, rightOK := importEpisodeOrder(docs[j].caption)
+		leftSeason, leftEpisode, leftOK := documentEpisodeOrder(docs[i])
+		rightSeason, rightEpisode, rightOK := documentEpisodeOrder(docs[j])
 		if leftOK != rightOK {
 			return leftOK
 		}
@@ -178,16 +196,29 @@ func (s *Service) importTopicPrepared(ctx context.Context, queuedImportID, sourc
 
 	var destinationGroupID string
 	var peerID, accessHash int64
-	err = s.DB.QueryRowContext(ctx, `SELECT c.id::text,c.telegram_peer_id,COALESCE(c.access_hash,0)
-		FROM tgstrm.settings st JOIN tgstrm.chats c ON c.id::text=(st.value #>> '{}')
-		WHERE st.key='active_chat_id' AND c.is_active AND c.is_forum AND c.account_id=$1`, accountID).
-		Scan(&destinationGroupID, &peerID, &accessHash)
+	if queuedImportID != "" {
+		err = s.DB.QueryRowContext(ctx, `SELECT c.id::text,c.telegram_peer_id,COALESCE(c.access_hash,0)
+ FROM tgstrm.catalog_imports ci JOIN tgstrm.chats c ON c.id=ci.destination_chat_id
+ WHERE ci.id::text=$1 AND c.account_id=$2 AND c.is_active AND c.is_forum`, queuedImportID, accountID).Scan(&destinationGroupID, &peerID, &accessHash)
+	} else if requestedDestinationTopicID != "" {
+		err = s.DB.QueryRowContext(ctx, `SELECT c.id::text,c.telegram_peer_id,COALESCE(c.access_hash,0)
+ FROM tgstrm.topics t JOIN tgstrm.managed_catalog_chats c ON c.id=t.chat_id
+ WHERE t.id::text=$1 AND t.is_active AND c.account_id=$2 AND c.is_active AND c.is_forum`, requestedDestinationTopicID, accountID).Scan(&destinationGroupID, &peerID, &accessHash)
+	} else {
+		err = s.DB.QueryRowContext(ctx, `SELECT c.id::text,c.telegram_peer_id,COALESCE(c.access_hash,0)
+ FROM tgstrm.active_catalog_chats c WHERE c.account_id=$1 AND c.is_active AND c.is_forum
+ AND (SELECT count(*) FROM tgstrm.active_catalog_chats WHERE account_id=$1 AND is_active AND is_forum)=1`, accountID).Scan(&destinationGroupID, &peerID, &accessHash)
+	}
+	if errors.Is(err, sql.ErrNoRows) && queuedImportID != "" {
+		destinationGroupID, peerID, accessHash, err = s.refreshQueuedImportDestination(ctx, queuedImportID)
+	}
 	if err != nil {
-		return ImportResult{}, errors.New("no hay un grupo principal disponible")
+		if errors.Is(err, sql.ErrNoRows) {
+			return ImportResult{}, errors.New("el destino guardado no está disponible; elige un cajón de tu biblioteca")
+		}
+		return ImportResult{}, fmt.Errorf("comprobar destino guardado: %w", err)
 	}
-	if destinationGroupID == sourceGroupID {
-		return ImportResult{}, errors.New("el topic ya pertenece al grupo principal")
-	}
+
 	s.apiMu.RLock()
 	api := s.runtimeAPI
 	s.apiMu.RUnlock()
@@ -209,9 +240,15 @@ func (s *Service) importTopicPrepared(ctx context.Context, queuedImportID, sourc
 			Scan(&destinationTopicID, &destinationTelegramID)
 	}
 	if errors.Is(err, sql.ErrNoRows) && strings.TrimSpace(requestedDestinationTopicID) == "" {
+		// One creation identity per durable job: retries reuse it, but a new
+		// import after the user deletes a topic must not replay its old creation.
+		creationIdentity := sourceTopicID
+		if queuedImportID != "" {
+			creationIdentity = queuedImportID
+		}
 		_, err = api.MessagesCreateForumTopic(ctx, &tg.MessagesCreateForumTopicRequest{
 			Peer: peer, Title: destinationTitle,
-			RandomID: stableRandomID(sourceTopicID, destinationGroupID, "topic"), IconColor: 0x6FB9F0,
+			RandomID: stableRandomID(creationIdentity, destinationGroupID, "topic"), IconColor: 0x6FB9F0,
 		})
 		if err != nil {
 			return ImportResult{}, fmt.Errorf("crear topic: %w", err)
@@ -225,6 +262,10 @@ func (s *Service) importTopicPrepared(ctx context.Context, queuedImportID, sourc
 	}
 	if err != nil {
 		return ImportResult{}, err
+	}
+
+	if destinationTopicID == sourceTopicID {
+		return ImportResult{}, errors.New("el topic de destino no puede ser el mismo que el origen")
 	}
 
 	importID := queuedImportID
@@ -310,6 +351,13 @@ func (s *Service) importTopicPrepared(ctx context.Context, queuedImportID, sourc
 
 	copied := 0
 	for _, d := range docs {
+		var blocked bool
+		if err = s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tgstrm.topic_replications tr JOIN tgstrm.group_replications gr ON gr.id=tr.group_replication_id JOIN tgstrm.collection_replication_plans p ON p.id=gr.plan_id LEFT JOIN tgstrm.topic_replication_manifests mf ON mf.id=tr.manifest_id WHERE tr.import_id::text=$1 AND (p.status<>'running' OR mf.status<>'eligible' OR mf.invalidated_at IS NOT NULL OR mf.revision IS DISTINCT FROM tr.manifest_revision))`, importID).Scan(&blocked); err != nil {
+			return ImportResult{}, err
+		}
+		if blocked {
+			return ImportResult{}, errors.New("la réplica se pausó o el origen cambió; revisa su manifiesto antes de continuar")
+		}
 		var alreadyComplete bool
 		_ = s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tgstrm.catalog_import_messages
 			WHERE import_id=$1 AND source_message_id=$2 AND status='completed')`, importID, d.messageID).Scan(&alreadyComplete)
@@ -324,11 +372,46 @@ func (s *Service) importTopicPrepared(ctx context.Context, queuedImportID, sourc
 		send := func(documentID, documentHash int64, fileReference []byte) error {
 			reply := &tg.InputReplyToMessage{ReplyToMsgID: destinationTelegramID}
 			reply.SetTopMsgID(destinationTelegramID)
-			_, sendErr := api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
+			updates, sendErr := api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
 				Peer: peer, ReplyTo: reply,
 				Media:   &tg.InputMediaDocument{ID: &tg.InputDocument{ID: documentID, AccessHash: documentHash, FileReference: fileReference}},
 				Message: d.caption, RandomID: stableRandomID(importID, d.messageID),
 			})
+			if sendErr == nil {
+				var list []tg.UpdateClass
+				switch result := updates.(type) {
+				case *tg.Updates:
+					list = result.Updates
+				case *tg.UpdatesCombined:
+					list = result.Updates
+				}
+				for _, item := range list {
+					if update, ok := item.(*tg.UpdateMessageID); ok && update.RandomID == stableRandomID(importID, d.messageID) {
+						if _, err := s.DB.ExecContext(ctx, `UPDATE tgstrm.catalog_import_messages SET destination_telegram_message_id=$3 WHERE import_id=$1 AND source_message_id=$2`, importID, d.messageID, update.ID); err != nil {
+							return err
+						}
+					}
+					if update, ok := item.(*tg.UpdateNewChannelMessage); ok {
+						if message, ok := update.Message.(*tg.Message); ok {
+							tx, storeErr := s.DB.BeginTx(ctx, nil)
+							if storeErr != nil {
+								return storeErr
+							}
+							_, storeErr = storeVideoMessage(ctx, tx, destinationGroupID, destinationTopicID, message)
+							if storeErr == nil {
+								_, storeErr = tx.ExecContext(ctx, `UPDATE tgstrm.catalog_import_messages SET destination_telegram_message_id=$3,destination_message_id=(SELECT id FROM tgstrm.messages WHERE chat_id::text=$4 AND telegram_message_id=$3) WHERE import_id=$1 AND source_message_id=$2`, importID, d.messageID, message.ID, destinationGroupID)
+							}
+							if storeErr != nil {
+								tx.Rollback()
+								return storeErr
+							}
+							if storeErr = tx.Commit(); storeErr != nil {
+								return storeErr
+							}
+						}
+					}
+				}
+			}
 			return sendErr
 		}
 		documentID, documentHash, fileReference := d.documentID, d.accessHash, d.fileReference
@@ -349,6 +432,15 @@ func (s *Service) importTopicPrepared(ctx context.Context, queuedImportID, sourc
 				documentID, documentHash, fileReference = fresh.DocumentID, fresh.AccessHash, fresh.FileReference
 				fileReferenceRefreshed = true
 				continue
+			}
+			if _, limited := tgerr.AsFloodWait(sendErr); limited {
+				var replication bool
+				if err := s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tgstrm.topic_replications WHERE import_id::text=$1)`, importID).Scan(&replication); err != nil {
+					return ImportResult{}, err
+				}
+				if replication {
+					return ImportResult{}, sendErr
+				}
 			}
 			flood, waitErr := tgerr.FloodWait(ctx, sendErr)
 			if flood {

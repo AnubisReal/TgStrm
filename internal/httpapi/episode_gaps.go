@@ -63,17 +63,27 @@ func (a *API) topicEpisodeGaps(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var fileName, caption string
 		var season, episode int
+		var endEpisode int
 		if rows.Scan(&fileName, &caption, &season, &episode) != nil {
-			continue
+			rows.Close()
+			fail(w, http.StatusInternalServerError, "episode_gaps_failed", "No se pudo leer la identificación de un archivo.")
+			return
 		}
 		if episode == 0 {
-			if detected, ok := detectEpisode(fileName, caption); ok {
-				season, episode = detected.Season, detected.Episode
+			if detected, ok := a.detectSeriesEpisode(r.Context(), seriesID, fileName, caption); ok {
+				season, episode, endEpisode = detected.Season, detected.Episode, detected.lastEpisode()
 			}
 		}
 		if episode > 0 {
-			present[[2]int{season, episode}] = struct{}{}
+			for number := episode; number <= max(episode, endEpisode); number++ {
+				present[[2]int{season, number}] = struct{}{}
+			}
 		}
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		fail(w, http.StatusInternalServerError, "episode_gaps_failed", "No se pudo completar la lectura de la biblioteca.")
+		return
 	}
 	rows.Close()
 
@@ -90,11 +100,17 @@ func (a *API) topicEpisodeGaps(w http.ResponseWriter, r *http.Request) {
 	missing := make([]missingEpisode, 0)
 	for rows.Next() {
 		var item missingEpisode
-		if rows.Scan(&item.Season, &item.Episode, &item.Title, &item.AirDate, &item.StillPath) == nil {
-			if _, exists := present[[2]int{item.Season, item.Episode}]; !exists {
-				missing = append(missing, item)
-			}
+		if rows.Scan(&item.Season, &item.Episode, &item.Title, &item.AirDate, &item.StillPath) != nil {
+			fail(w, http.StatusInternalServerError, "episode_gaps_failed", "No se pudo leer un episodio del catálogo.")
+			return
 		}
+		if _, exists := present[[2]int{item.Season, item.Episode}]; !exists {
+			missing = append(missing, item)
+		}
+	}
+	if err = rows.Err(); err != nil {
+		fail(w, http.StatusInternalServerError, "episode_gaps_failed", "No se pudo completar el catálogo de episodios.")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"missing": missing, "image_base_url": "https://image.tmdb.org/t/p/w300"})
 }

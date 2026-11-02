@@ -34,8 +34,11 @@ type TopicMessage struct {
 	Height           int        `json:"height,omitempty"`
 	DurationSeconds  int        `json:"duration_seconds,omitempty"`
 	ExportError      string     `json:"export_error,omitempty"`
+	ExportStatus     string     `json:"export_status"`
 	SeasonNumber     int        `json:"season_number,omitempty"`
 	EpisodeNumber    int        `json:"episode_number,omitempty"`
+	EpisodeEndNumber int        `json:"episode_end_number,omitempty"`
+	EpisodeSource    string     `json:"episode_source,omitempty"`
 }
 
 type VideoDetail struct {
@@ -171,8 +174,9 @@ func (s *Service) RefreshTopicMessages(ctx context.Context, groupID, topicID str
 	if err != nil {
 		return TopicRemotePage{}, err
 	}
-	if accessHash == 0 {
-		return TopicRemotePage{}, errors.New("forum peer unavailable")
+	peer, peerErr := s.fileTransferPeer(ctx, groupID)
+	if peerErr != nil {
+		return TopicRemotePage{}, peerErr
 	}
 	s.apiMu.RLock()
 	api := s.runtimeAPI
@@ -180,7 +184,15 @@ func (s *Service) RefreshTopicMessages(ctx context.Context, groupID, topicID str
 	if api == nil {
 		return TopicRemotePage{}, errors.New("telegram is reconnecting")
 	}
-	result, err := api.MessagesGetReplies(ctx, &tg.MessagesGetRepliesRequest{Peer: &tg.InputPeerChannel{ChannelID: peerID, AccessHash: accessHash}, MsgID: telegramTopicID, OffsetID: before, Limit: 50})
+	var result tg.MessagesMessagesClass
+	result, err = s.historyReadGate.read(ctx, func() (tg.MessagesMessagesClass, error) {
+		if telegramTopicID == 0 {
+			result, err = api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{Peer: peer, OffsetID: before, Limit: 50})
+		} else {
+			result, err = api.MessagesGetReplies(ctx, &tg.MessagesGetRepliesRequest{Peer: peer, MsgID: telegramTopicID, OffsetID: before, Limit: 50})
+		}
+		return result, err
+	})
 	if err != nil {
 		return TopicRemotePage{}, err
 	}
@@ -268,8 +280,9 @@ func (s *Service) refreshTopicFilteredVideos(ctx context.Context, groupID, topic
 	if err != nil {
 		return TopicRemotePage{}, err
 	}
-	if accessHash == 0 {
-		return TopicRemotePage{}, errors.New("forum peer unavailable")
+	peer, peerErr := s.fileTransferPeer(ctx, groupID)
+	if peerErr != nil {
+		return TopicRemotePage{}, peerErr
 	}
 	s.apiMu.RLock()
 	api := s.runtimeAPI
@@ -278,10 +291,12 @@ func (s *Service) refreshTopicFilteredVideos(ctx context.Context, groupID, topic
 		return TopicRemotePage{}, errors.New("telegram is reconnecting")
 	}
 	request := &tg.MessagesSearchRequest{
-		Peer: &tg.InputPeerChannel{ChannelID: peerID, AccessHash: accessHash},
+		Peer: peer,
 		Q:    "", Filter: filter, OffsetID: before, Limit: 100,
 	}
-	request.SetTopMsgID(telegramTopicID)
+	if telegramTopicID > 0 {
+		request.SetTopMsgID(telegramTopicID)
+	}
 	result, err := api.MessagesSearch(ctx, request)
 	if err != nil {
 		return TopicRemotePage{}, err
@@ -396,7 +411,7 @@ func (s *Service) TopicMessages(ctx context.Context, topicID string, before, lim
 	rows, err := s.DB.QueryContext(ctx, `SELECT m.id::text,m.telegram_message_id,COALESCE(m.sender_peer_type,''),COALESCE(m.sender_peer_id,0)::text,
 	 m.body,COALESCE(m.media_type,''),COALESCE(m.reply_to_message_id,0),m.sent_at,m.edited_at,m.is_outgoing,m.is_pinned,
 	 COALESCE(mm.file_name,''),COALESCE(mm.mime_type,''),COALESCE(mm.byte_size,0),COALESCE(mm.width,0),COALESCE(mm.height,0),COALESCE(mm.duration_seconds,0),
-	 COALESCE(sa.last_export_error,''),COALESCE(eo.season_number,
+	 `+exportStateColumns+`,COALESCE(eo.season_number,
 		NULLIF(substring(written.relative_path FROM 'S([0-9]{1,2})E[0-9]{1,3}'),'')::integer,0),
 	 COALESCE(eo.episode_number,
 		NULLIF(substring(written.relative_path FROM 'S[0-9]{1,2}E([0-9]{1,3})'),'')::integer,0)
@@ -405,6 +420,7 @@ func (s *Service) TopicMessages(ctx context.Context, topicID string, before, lim
 	 LEFT JOIN tgstrm.stream_episode_overrides eo ON eo.asset_id=sa.id
 	 LEFT JOIN LATERAL (SELECT e.relative_path FROM tgstrm.stream_exports e
 		WHERE e.asset_id=sa.id AND e.status='written' ORDER BY e.updated_at DESC LIMIT 1) written ON true
+	 `+latestExportJoin+`
 	 WHERE m.topic_id=$1 AND m.is_active AND m.media_type='video' AND ($2=0 OR m.telegram_message_id<$2)
 	 ORDER BY m.telegram_message_id DESC LIMIT $3`, topicID, before, limit+1)
 	if err != nil {
@@ -416,7 +432,7 @@ func (s *Service) TopicMessages(ctx context.Context, topicID string, before, lim
 		var message TopicMessage
 		if err = rows.Scan(&message.ID, &message.TelegramID, &message.SenderPeerType, &message.SenderPeerID, &message.Body, &message.MediaType,
 			&message.ReplyToMessageID, &message.SentAt, &message.EditedAt, &message.Outgoing, &message.Pinned,
-			&message.FileName, &message.MIMEType, &message.ByteSize, &message.Width, &message.Height, &message.DurationSeconds, &message.ExportError,
+			&message.FileName, &message.MIMEType, &message.ByteSize, &message.Width, &message.Height, &message.DurationSeconds, &message.ExportError, &message.ExportStatus,
 			&message.SeasonNumber, &message.EpisodeNumber); err != nil {
 			return nil, false, err
 		}

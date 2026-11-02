@@ -110,9 +110,11 @@ func splitTMDBIDMarker(value string) (string, int64, bool) {
 	return strings.TrimSpace(value[:match[0]]), id, true
 }
 
+var tmdbYearRangePattern = regexp.MustCompile(`\s*[\(\[]((?:19|20)\d{2})\s*[-–—]\s*(?:19|20)\d{2}[\)\]]\s*$`)
+
 func splitTMDBTitleYear(value string) (string, string) {
 	value, _, _ = splitTMDBIDMarker(value)
-	for _, pattern := range []*regexp.Regexp{tmdbParenthesizedYearPattern, tmdbTrailingYearPattern} {
+	for _, pattern := range []*regexp.Regexp{tmdbYearRangePattern, tmdbParenthesizedYearPattern, tmdbTrailingYearPattern} {
 		match := pattern.FindStringSubmatchIndex(value)
 		if len(match) >= 4 {
 			year := value[match[2]:match[3]]
@@ -198,9 +200,42 @@ func (a *API) searchTMDB(w http.ResponseWriter, r *http.Request) {
 	}
 	mediaType, ok := normalizeTMDBType(r.URL.Query().Get("media_type"))
 	query := strings.TrimSpace(r.URL.Query().Get("query"))
-	if !ok || len([]rune(query)) < 2 || len([]rune(query)) > 160 {
-		fail(w, 422, "invalid_tmdb_search", "Indica el tipo y un título válido.")
+	id, direct := manualTMDBSearchID(query)
+	if !ok || (!direct && len([]rune(query)) < 2) || len([]rune(query)) > 160 {
+		fail(w, 422, "invalid_tmdb_search", "Indica el tipo y un título o ID de TMDB válido.")
 		return
+	}
+	if direct {
+		var result tmdbResult
+		var err error
+		if mediaType == "tv" {
+			result, err = a.localizedTVDetails(r.Context(), id)
+		} else {
+			result, err = a.localizedMovieDetails(r.Context(), id)
+		}
+		var responseErr tmdbResponseError
+		if err == nil {
+			writeJSON(w, 200, map[string]any{"media_type": mediaType, "query": query, "image_base_url": "https://image.tmdb.org/t/p/w342", "results": []tmdbResult{result}})
+			return
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			fail(w, 422, "tmdb_not_configured", "Configura y verifica TMDB antes de buscar.")
+			return
+		}
+		if errors.As(err, &responseErr) && (responseErr.status == http.StatusUnauthorized || responseErr.status == http.StatusForbidden) {
+			fail(w, 422, "tmdb_rejected", "TMDB rechazó la credencial configurada. Revísala en Ajustes.")
+			return
+		}
+		if errors.As(err, &responseErr) && responseErr.status == http.StatusNotFound {
+			// Numeric titles are still searchable when no such identifier exists.
+			if strings.HasPrefix(strings.ToLower(query), "tmdb:") {
+				writeJSON(w, 200, map[string]any{"media_type": mediaType, "query": query, "results": []tmdbResult{}})
+				return
+			}
+		} else {
+			fail(w, 502, "tmdb_search_failed", "No se pudo consultar ese ID en TMDB. Comprueba la configuración y vuelve a intentarlo.")
+			return
+		}
 	}
 	var response struct {
 		Results []struct {
@@ -250,6 +285,23 @@ func (a *API) searchTMDB(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, 200, map[string]any{"media_type": mediaType, "query": query, "image_base_url": "https://image.tmdb.org/t/p/w342", "results": results})
+}
+
+func manualTMDBSearchID(query string) (int64, bool) {
+	value := strings.TrimSpace(query)
+	if strings.HasPrefix(strings.ToLower(value), "tmdb:") {
+		value = strings.TrimSpace(value[5:])
+	}
+	if value == "" {
+		return 0, false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return 0, false
+		}
+	}
+	id, err := strconv.ParseInt(value, 10, 32)
+	return id, err == nil && id > 0
 }
 
 type confirmTMDBInput struct {
@@ -315,18 +367,50 @@ func (a *API) confirmTMDBMatch(w http.ResponseWriter, r *http.Request) {
 		result.Title, result.OriginalTitle, result.ReleaseDate = details.Name, details.OriginalName, details.FirstAirDate
 	}
 	metadata, _ := json.Marshal(result)
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		fail(w, 500, "tmdb_match_failed", "No se pudo iniciar la asociación.")
+		return
+	}
+	defer tx.Rollback()
+	if messageID == nil {
+		var locked bool
+		if err = tx.QueryRowContext(r.Context(), `SELECT pg_try_advisory_xact_lock(hashtextextended('topic-identity:' || $1::text,0))`, strconv.FormatInt(topicID, 10)).Scan(&locked); err != nil || !locked {
+			fail(w, 409, "correction_in_progress", "La corrección está aplicando un cambio. Vuelve a intentarlo en unos segundos.")
+			return
+		}
+		var duplicate bool
+		if err = tx.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM tgstrm.tmdb_matches other JOIN tgstrm.topics t ON t.id=other.topic_id WHERE t.chat_id::text=$1 AND t.is_active AND t.id<>$2 AND other.message_id IS NULL AND other.media_type='tv' AND other.tmdb_id=$3 AND EXISTS(SELECT 1 FROM tgstrm.topic_replications tr WHERE tr.destination_topic_id=$2))`, r.PathValue("groupID"), topicID, result.ID).Scan(&duplicate); err != nil {
+			fail(w, 500, "tmdb_match_failed", "No se pudo comprobar la serie.")
+			return
+		}
+		if duplicate {
+			fail(w, 409, "series_already_present", "Esa serie ya está asociada a otro topic del cajón. No se sobrescribirá su biblioteca.")
+			return
+		}
+	}
 	var matchID string
 	if messageID == nil {
-		err = a.db.QueryRowContext(r.Context(), `INSERT INTO tgstrm.tmdb_matches(topic_id,message_id,media_type,tmdb_id,title,original_title,release_date,poster_path,backdrop_path,overview,metadata)
+		err = tx.QueryRowContext(r.Context(), `INSERT INTO tgstrm.tmdb_matches(topic_id,message_id,media_type,tmdb_id,title,original_title,release_date,poster_path,backdrop_path,overview,metadata)
 		 VALUES($1,NULL,$2,$3,$4,$5,NULLIF($6,'')::date,NULLIF($7,''),NULLIF($8,''),$9,$10)
 		 ON CONFLICT(topic_id) WHERE message_id IS NULL DO UPDATE SET media_type=EXCLUDED.media_type,tmdb_id=EXCLUDED.tmdb_id,title=EXCLUDED.title,original_title=EXCLUDED.original_title,release_date=EXCLUDED.release_date,poster_path=EXCLUDED.poster_path,backdrop_path=EXCLUDED.backdrop_path,overview=EXCLUDED.overview,metadata=EXCLUDED.metadata,confirmed_at=now(),updated_at=now() RETURNING id::text`, topicID, mediaType, result.ID, result.Title, result.OriginalTitle, result.ReleaseDate, result.PosterPath, result.BackdropPath, result.Overview, metadata).Scan(&matchID)
 	} else {
-		err = a.db.QueryRowContext(r.Context(), `INSERT INTO tgstrm.tmdb_matches(topic_id,message_id,media_type,tmdb_id,title,original_title,release_date,poster_path,overview,metadata)
+		err = tx.QueryRowContext(r.Context(), `INSERT INTO tgstrm.tmdb_matches(topic_id,message_id,media_type,tmdb_id,title,original_title,release_date,poster_path,overview,metadata)
 		 VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,'')::date,NULLIF($8,''),$9,$10)
 		 ON CONFLICT(message_id) WHERE message_id IS NOT NULL DO UPDATE SET media_type=EXCLUDED.media_type,tmdb_id=EXCLUDED.tmdb_id,title=EXCLUDED.title,original_title=EXCLUDED.original_title,release_date=EXCLUDED.release_date,poster_path=EXCLUDED.poster_path,overview=EXCLUDED.overview,metadata=EXCLUDED.metadata,confirmed_at=now(),updated_at=now() RETURNING id::text`, topicID, messageID, mediaType, result.ID, result.Title, result.OriginalTitle, result.ReleaseDate, result.PosterPath, result.Overview, metadata).Scan(&matchID)
 	}
 	if err != nil {
 		fail(w, 500, "tmdb_match_failed", "No se pudo guardar la asociación de TMDB.")
+		return
+	}
+	if messageID == nil {
+		if _, err = tx.ExecContext(r.Context(), `UPDATE tgstrm.topic_identity_jobs SET revision=revision+1,status='pending',last_error=NULL,next_attempt_at=now(),updated_at=now() WHERE topic_id=$1 AND status='attention'`, topicID); err != nil {
+			fail(w, 500, "tmdb_match_failed", "No se pudo preparar la corrección.")
+			return
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		fail(w, 500, "tmdb_match_failed", "No se pudo guardar la asociación.")
 		return
 	}
 	if messageID == nil {

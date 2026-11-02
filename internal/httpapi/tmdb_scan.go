@@ -43,16 +43,24 @@ func normalizedTMDBTitle(value string) string {
 func tmdbExactMatch(source string, results []tmdbResult) (tmdbResult, bool) {
 	_, requestedYear := splitTMDBTitleYear(source)
 	wanted := normalizedTMDBTitle(source)
+	var chosen tmdbResult
 	for _, result := range results {
+		if result.ID <= 0 || wanted == "" {
+			continue
+		}
 		if normalizedTMDBTitle(result.Title) != wanted && normalizedTMDBTitle(result.OriginalTitle) != wanted {
 			continue
 		}
 		if requestedYear != "" && !strings.HasPrefix(result.ReleaseDate, requestedYear) {
 			continue
 		}
-		return result, true
+		if chosen.ID > 0 && chosen.ID != result.ID {
+			// Matching names do not establish a unique movie identity.
+			return tmdbResult{}, false
+		}
+		chosen = result
 	}
-	return tmdbResult{}, false
+	return chosen, chosen.ID > 0
 }
 
 func (a *API) startTMDBScan(w http.ResponseWriter, r *http.Request) {
@@ -62,8 +70,8 @@ func (a *API) startTMDBScan(w http.ResponseWriter, r *http.Request) {
 	}
 	groupID, topicID := r.PathValue("groupID"), r.PathValue("topicID")
 	var eligible bool
-	if err := a.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM tgstrm.topics t JOIN tgstrm.settings s ON s.key='active_chat_id'
-		WHERE t.id::text=$1 AND t.chat_id::text=$2 AND (s.value #>> '{}')=t.chat_id::text AND t.library_kind='movie_collection')`, topicID, groupID).Scan(&eligible); err != nil || !eligible {
+	if err := a.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM tgstrm.topics t JOIN tgstrm.managed_catalog_chats mc ON mc.id=t.chat_id
+		WHERE t.id::text=$1 AND t.chat_id::text=$2 AND t.library_kind='movie_collection')`, topicID, groupID).Scan(&eligible); err != nil || !eligible {
 		writeJSON(w, 202, map[string]any{"status": "skipped"})
 		return
 	}
@@ -106,10 +114,9 @@ func (a *API) runMovieMatchReconciler(ctx context.Context) {
 func (a *API) processPendingPrimaryMovies(ctx context.Context) {
 	var groupID, topicID string
 	err := a.db.QueryRowContext(ctx, `SELECT c.id::text,t.id::text
-	 FROM tgstrm.settings active
-	 JOIN tgstrm.chats c ON c.id::text=(active.value #>> '{}') AND c.is_active
+	 FROM tgstrm.managed_catalog_chats c
 	 JOIN tgstrm.topics t ON t.chat_id=c.id AND t.is_active AND t.library_kind='movie_collection'
-	 WHERE active.key='active_chat_id' AND EXISTS(
+	 WHERE c.is_active AND EXISTS(
 	   SELECT 1 FROM tgstrm.messages m
 	   LEFT JOIN tgstrm.tmdb_matches tm ON tm.message_id=m.id
 	   LEFT JOIN tgstrm.tmdb_scan_states ss ON ss.message_id=m.id

@@ -74,6 +74,39 @@ export const router = createBrowserRouter([
     loader: () => requireDestination("home"),
     element: <DashboardPage />,
   },
+  ...["/library", "/library/manage", "/library/topics/:topicId", "/library/topics/:topicId/manage", "/library/topics/:topicId/videos/:videoId"].map((path) => ({
+    path,
+    loader: async ({ request, params }: { request: Request; params: Record<string,string | undefined> }) => {
+      await requireDestination("home");
+      if (params.topicId) {
+        const response = await fetch(`/api/v1/library/topics/${params.topicId}/location`, {credentials:"same-origin",signal:request.signal});
+        if (!response.ok) throw new Response("El topic no está disponible", {status:response.status});
+        const location = await response.json() as {group_id:string;collection_id:string};
+        const base = location.collection_id ? `/library/collections/${location.collection_id}/groups/${location.group_id}` : `/groups/${location.group_id}`;
+        const suffix = params.videoId ? `/videos/${params.videoId}` : new URL(request.url).pathname.endsWith("/manage") ? "/manage" : "";
+        throw redirect(`${base}/topics/${params.topicId}${suffix}`);
+      }
+      const scopeResponse = await fetch("/api/v1/library/target", { credentials: "same-origin", signal: request.signal });
+      if (!scopeResponse.ok) throw new Response("No se pudo cargar la biblioteca", { status: scopeResponse.status });
+      const scope = await scopeResponse.json() as { mode: string; collection_id?: string; group_id?: string };
+      if (scope.mode === "collection" && scope.collection_id) throw redirect(`/library/collections/${scope.collection_id}${new URL(request.url).pathname.endsWith("/manage") ? "/manage" : ""}`);
+      return { libraryGroupId: scope.group_id };
+    },
+    element: <DashboardPage mode="library" />,
+  })),
+  ...["/library/collections/:collectionId", "/library/collections/:collectionId/manage", "/library/collections/:collectionId/groups/:groupId", "/library/collections/:collectionId/groups/:groupId/manage", "/library/collections/:collectionId/groups/:groupId/topics/:topicId", "/library/collections/:collectionId/groups/:groupId/topics/:topicId/manage", "/library/collections/:collectionId/groups/:groupId/topics/:topicId/videos/:videoId"].map(path => ({
+    path,
+    loader: async ({ request, params }: { request: Request; params: Record<string, string | undefined> }) => {
+      await requireDestination("home");
+      const response = await fetch(`/api/v1/library/collections/${params.collectionId}`, { credentials: "same-origin", signal: request.signal });
+      if (!response.ok) throw new Response("La carpeta no está disponible", { status: response.status });
+      const data = await response.json() as { groups: { group_id: string; state: string }[] };
+      if (params.groupId && !data.groups.some(group => group.group_id === params.groupId && group.state !== "destination_missing")) throw new Response("El cajón no pertenece a esta carpeta", { status: 404 });
+      return { libraryGroupId: params.groupId };
+    },
+    element: <DashboardPage mode="library" />,
+  })),
+  { path: "/imports/replications/:planId/review", loader: () => requireDestination("home"), element: <DashboardPage mode="replication-review" /> },
   {
     path: "/settings",
     loader: () => requireDestination("home"),

@@ -33,3 +33,11 @@ func TestSortImportDocumentsKeepsUnknownChronological(t *testing.T) {
 		}
 	}
 }
+
+func TestImportOrderFallsBackToFilename(t *testing.T) {
+	docs := []importDocument{{telegramID: 1, fileName: "Superman_T1_02.mp4", caption: "superman 2"}, {telegramID: 99, fileName: "Superman_T1_01.mp4", caption: "superman 1"}}
+	sortImportDocuments(docs)
+	if docs[0].telegramID != 99 {
+		t.Fatal("episode one must precede episode two regardless of source date")
+	}
+}

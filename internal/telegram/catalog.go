@@ -21,6 +21,7 @@ type Group struct {
 	Type       string `json:"type"`
 	Forum      bool   `json:"forum"`
 	Active     bool   `json:"active"`
+	Managed    bool   `json:"managed"`
 }
 
 type remoteGroup struct {
@@ -134,30 +135,43 @@ func (s *Service) IndexRemoteTopic(ctx context.Context, peerType string, peerID 
 }
 
 func (s *Service) Groups(ctx context.Context) ([]Group, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT id::text,telegram_peer_id::text,title,COALESCE(username,''),telegram_peer_type,is_forum
+	rows, err := s.DB.QueryContext(ctx, `SELECT id::text,telegram_peer_id::text,title,COALESCE(username,''),telegram_peer_type,is_forum,EXISTS(SELECT 1 FROM tgstrm.managed_catalog_chats mc WHERE mc.id=tgstrm.chats.id)
 	 FROM tgstrm.chats WHERE account_id=$1 AND is_active ORDER BY lower(title),id`, accountID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	activeID := ""
-	var value []byte
-	if err = s.DB.QueryRowContext(ctx, "SELECT value FROM tgstrm.settings WHERE key='active_chat_id'").Scan(&value); err == nil {
-		_ = json.Unmarshal(value, &activeID)
+	activeIDs := make(map[string]bool)
+	activeRows, activeErr := s.DB.QueryContext(ctx, "SELECT id::text FROM tgstrm.active_catalog_chats WHERE account_id=$1", accountID)
+	if activeErr != nil {
+		return nil, activeErr
+	}
+	for activeRows.Next() {
+		var id string
+		if err = activeRows.Scan(&id); err != nil {
+			activeRows.Close()
+			return nil, err
+		}
+		activeIDs[id] = true
+	}
+	activeErr = activeRows.Err()
+	activeRows.Close()
+	if activeErr != nil {
+		return nil, activeErr
 	}
 	result := []Group{}
 	for rows.Next() {
 		var g Group
-		if err = rows.Scan(&g.ID, &g.TelegramID, &g.Title, &g.Username, &g.Type, &g.Forum); err != nil {
+		if err = rows.Scan(&g.ID, &g.TelegramID, &g.Title, &g.Username, &g.Type, &g.Forum, &g.Managed); err != nil {
 			return nil, err
 		}
-		g.Active = g.ID == activeID
+		g.Active = activeIDs[g.ID]
 		result = append(result, g)
 	}
 	return result, rows.Err()
 }
 
-func (s *Service) SelectGroup(ctx context.Context, id string) error {
+func (s *Service) SelectGroup(ctx context.Context, id string, expectedRevision ...int64) error {
 	var exists bool
 	if err := s.DB.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM tgstrm.chats WHERE id::text=$1 AND account_id=$2 AND is_active)", id, accountID).Scan(&exists); err != nil {
 		return err
@@ -171,8 +185,24 @@ func (s *Service) SelectGroup(ctx context.Context, id string) error {
 		return err
 	}
 	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "catalog-target:"+accountID); err != nil {
+		return err
+	}
+	if len(expectedRevision) > 0 {
+		var revision int64
+		if err = tx.QueryRowContext(ctx, `SELECT COALESCE((SELECT revision FROM tgstrm.catalog_targets WHERE account_id=$1),(SELECT revision FROM tgstrm.settings WHERE key='active_chat_id'),0)`, accountID).Scan(&revision); err != nil {
+			return err
+		}
+		if revision != expectedRevision[0] {
+			return errors.New("la configuración cambió; vuelve a cargar el destino")
+		}
+	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO tgstrm.settings(key,value) VALUES('active_chat_id',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,revision=tgstrm.settings.revision+1,updated_at=now()`, raw); err != nil {
 		return fmt.Errorf("save active group: %w", err)
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO tgstrm.catalog_targets(account_id,mode,group_chat_id) VALUES($1,'group',$2::bigint)
+ ON CONFLICT(account_id) DO UPDATE SET mode='group',group_chat_id=EXCLUDED.group_chat_id,collection_id=NULL,revision=tgstrm.catalog_targets.revision+1,updated_at=now()`, accountID, id); err != nil {
+		return err
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE tgstrm.topics SET library_kind=CASE
 		WHEN lower(trim(title)) IN ('peliculas','películas','movies','films') THEN 'movie_collection'

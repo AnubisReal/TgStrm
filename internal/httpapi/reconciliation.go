@@ -5,12 +5,16 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	telegramauth "tgstrm/internal/telegram"
 	"time"
 )
 
@@ -41,12 +45,14 @@ func (a *API) reconciliation(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
 	report := reconciliationReport{CheckedAt: time.Now()}
+	groupID, topicID := r.PathValue("groupID"), r.PathValue("topicID")
 	rows, err := a.db.QueryContext(ctx, `SELECT lt.root_path,e.relative_path,e.status
 		FROM tgstrm.stream_exports e JOIN tgstrm.library_targets lt ON lt.id=e.library_id
 		JOIN tgstrm.stream_assets sa ON sa.id=e.asset_id
 		JOIN tgstrm.messages m ON m.id=sa.message_id AND m.is_active
 		JOIN tgstrm.topics t ON t.id=m.topic_id AND t.is_active
-		JOIN tgstrm.chats c ON c.id=t.chat_id AND c.is_active`)
+		JOIN tgstrm.chats c ON c.id=t.chat_id AND c.is_active
+        WHERE ($1='' OR c.id::text=$1) AND ($2='' OR t.id::text=$2)`, groupID, topicID)
 	if err != nil {
 		fail(w, http.StatusInternalServerError, "reconciliation_failed", "No se pudo revisar los STRM.")
 		return
@@ -85,20 +91,57 @@ func (a *API) reconciliation(w http.ResponseWriter, r *http.Request) {
 	// Pending is a live workflow state. Count it after the filesystem pass so a
 	// short atomic-write transition cannot make a completed export look stuck in
 	// the audit result.
-	_ = a.db.QueryRowContext(ctx, `SELECT count(*) FROM tgstrm.stream_exports e
+	if err := a.db.QueryRowContext(ctx, `SELECT count(*) FROM tgstrm.stream_exports e
 		JOIN tgstrm.stream_assets sa ON sa.id=e.asset_id
 		JOIN tgstrm.messages m ON m.id=sa.message_id AND m.is_active
 		JOIN tgstrm.topics t ON t.id=m.topic_id AND t.is_active
 		JOIN tgstrm.chats c ON c.id=t.chat_id AND c.is_active
-		WHERE e.status='pending' AND e.updated_at < now()-interval '10 seconds'`).Scan(&report.PendingExports)
-	_ = a.db.QueryRowContext(ctx, `SELECT count(*) FROM tgstrm.messages m
+		WHERE e.status='pending' AND e.updated_at < now()-interval '10 seconds' AND ($1='' OR c.id::text=$1) AND ($2='' OR t.id::text=$2)`, groupID, topicID).Scan(&report.PendingExports); err != nil {
+		fail(w, 500, "reconciliation_failed", "No se pudo completar la comprobación de estado.")
+		return
+	}
+	if err := a.db.QueryRowContext(ctx, `SELECT count(*) FROM tgstrm.messages m
 		JOIN tgstrm.topics t ON t.id=m.topic_id AND t.is_active
 		JOIN tgstrm.chats c ON c.id=t.chat_id AND c.is_active
 		LEFT JOIN tgstrm.stream_assets sa ON sa.message_id=m.id
-		WHERE m.is_active AND m.media_type='video' AND sa.id IS NULL`).Scan(&report.VideosWithoutAsset)
-	_ = a.db.QueryRowContext(ctx, `SELECT count(*) FROM tgstrm.outbox_events WHERE delivered_at IS NULL`).Scan(&report.PendingEvents)
-	_ = a.db.QueryRowContext(ctx, `SELECT count(*) FILTER (WHERE status IN ('pending','sending')),
-		count(*) FILTER (WHERE status='failed' OR edit_status='failed') FROM tgstrm.mirror_deliveries`).Scan(&report.MirrorPending, &report.MirrorFailed)
+		WHERE m.is_active AND m.media_type='video' AND sa.id IS NULL AND ($1='' OR c.id::text=$1) AND ($2='' OR t.id::text=$2)`, groupID, topicID).Scan(&report.VideosWithoutAsset); err != nil {
+		fail(w, 500, "reconciliation_failed", "No se pudo completar la comprobación de estado.")
+		return
+	}
+	if topicID == "" {
+		if err := a.db.QueryRowContext(ctx, `SELECT count(*) FROM tgstrm.outbox_events WHERE delivered_at IS NULL`).Scan(&report.PendingEvents); err != nil {
+			fail(w, 500, "reconciliation_failed", "No se pudo completar la comprobación de estado.")
+			return
+		}
+		if err := a.db.QueryRowContext(ctx, `SELECT count(*) FILTER (WHERE status IN ('pending','sending')),
+		count(*) FILTER (WHERE status='failed' OR edit_status='failed') FROM tgstrm.mirror_deliveries`).Scan(&report.MirrorPending, &report.MirrorFailed); err != nil {
+			fail(w, 500, "reconciliation_failed", "No se pudo completar la comprobación de estado.")
+			return
+		}
+	}
+	if topicID != "" && r.Method == http.MethodPost {
+		status := "completed"
+		if report.MissingFiles+report.ErroredExports > 0 {
+			status = "error"
+		}
+		detail := fmt.Sprintf("%d STRM revisados · %d ausentes · %d con incidencias", report.ExportsChecked, report.MissingFiles, report.ErroredExports)
+		tx, err := a.db.BeginTx(ctx, nil)
+		if err == nil {
+			_, err = tx.ExecContext(ctx, `INSERT INTO tgstrm.activity_events(kind,status,title,detail,group_id,topic_id,item_count)
+            SELECT 'reconciliation',$1,'Comprobación de '||title,$2,chat_id,id,$3 FROM tgstrm.topics WHERE id::text=$4 AND chat_id::text=$5`, status, detail, report.ExportsChecked, topicID, groupID)
+			if err == nil {
+				_, err = tx.ExecContext(ctx, `INSERT INTO tgstrm.outbox_events(event_type,aggregate_type,aggregate_id,payload) VALUES('activity.snapshot','topic',$1::bigint,'{}'::jsonb)`, topicID)
+			}
+			if err == nil {
+				err = tx.Commit()
+			} else {
+				_ = tx.Rollback()
+			}
+		}
+		if err != nil {
+			log.Printf("record topic check group=%s topic=%s: %v", groupID, topicID, err)
+		}
+	}
 	writeJSON(w, http.StatusOK, report)
 }
 
@@ -107,6 +150,9 @@ func (a *API) reconciliation(w http.ResponseWriter, r *http.Request) {
 // canonical content stored by PostgreSQL. It never deletes, renames or
 // reclassifies a library entry.
 func (a *API) repairMissingExports(w http.ResponseWriter, r *http.Request) {
+	ctx, unlock := a.lockExportLibrary(r.Context())
+	defer unlock()
+	r = r.WithContext(ctx)
 	if a.db == nil {
 		fail(w, http.StatusServiceUnavailable, "database_unavailable", "PostgreSQL no está disponible.")
 		return
@@ -203,4 +249,53 @@ func (a *API) repairMissingExports(w http.ResponseWriter, r *http.Request) {
 			VALUES('reconciliation',$1,'Reparación de biblioteca',$2,$3)`, status, detail, written)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "completed", "found": len(candidates), "written": written, "failed": failed})
+}
+
+// checkTopic refreshes only the chosen thread, then audits its known exports.
+// It invokes no direct export or repair and does not scan other topics.
+// Refreshed catalog records still follow the existing automatic reconcilers.
+func (a *API) checkTopic(w http.ResponseWriter, r *http.Request) {
+	service := a.telegramService()
+	if service == nil {
+		fail(w, 503, "telegram_unavailable", "Telegram no está disponible.")
+		return
+	}
+	lockKey := "check:" + r.PathValue("groupID") + ":" + r.PathValue("topicID")
+	value, _ := a.exportLocks.LoadOrStore(lockKey, &sync.Mutex{})
+	lock := value.(*sync.Mutex)
+	if !lock.TryLock() {
+		fail(w, 409, "topic_check_running", "Este topic ya se está comprobando.")
+		return
+	}
+	defer lock.Unlock()
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	groupID, topicID := r.PathValue("groupID"), r.PathValue("topicID")
+	if _, err := service.Topic(ctx, groupID, topicID); err != nil {
+		if errors.Is(err, telegramauth.ErrTopicNotFound) {
+			fail(w, 404, "topic_not_found", "El topic no está disponible.")
+		} else {
+			fail(w, 500, "topic_failed", "No se pudo consultar el topic.")
+		}
+		return
+	}
+	if err := service.SyncTopicVideoCatalog(ctx, groupID, topicID); err != nil {
+		fail(w, 502, "topic_check_failed", "No se pudo completar la comprobación con Telegram. Puedes volver a intentarlo.")
+		return
+	}
+	a.reconciliation(w, r)
+}
+
+func (a *API) topicExportStates(w http.ResponseWriter, r *http.Request) {
+	service := a.telegramService()
+	if service == nil {
+		fail(w, 503, "telegram_unavailable", "El catálogo no está disponible.")
+		return
+	}
+	states, err := service.TopicExportStates(r.Context(), r.PathValue("groupID"), r.PathValue("topicID"))
+	if err != nil {
+		fail(w, 500, "export_states_failed", "No se pudieron consultar los estados STRM.")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"states": states})
 }

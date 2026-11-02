@@ -10,6 +10,9 @@ func TestSplitTMDBTitleYear(t *testing.T) {
 		{"Un talento único (2026)", "Un talento único", "2026"},
 		{"Dallas Buyers Club [2013]", "Dallas Buyers Club", "2013"},
 		{"Cold War 2018", "Cold War", "2018"},
+		{"The Blacklist (2013-2023)", "The Blacklist", "2013"},
+		{"Serie [1999–2005]", "Serie", "1999"},
+		{"Serie (2013-2023) [tmdbid-46952]", "Serie", "2013"},
 		{"2001: Una odisea del espacio", "2001: Una odisea del espacio", ""},
 	}
 	for _, test := range tests {

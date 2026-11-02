@@ -24,7 +24,7 @@ func (a *API) startTopicArtworkScan(w http.ResponseWriter, r *http.Request) {
 	}
 	groupID := r.PathValue("groupID")
 	var primary bool
-	if err := a.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM tgstrm.settings WHERE key='active_chat_id' AND (value #>> '{}')=$1)`, groupID).Scan(&primary); err != nil || !primary {
+	if err := a.db.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM tgstrm.managed_catalog_chats WHERE id::text=$1 AND is_active)`, groupID).Scan(&primary); err != nil || !primary {
 		writeJSON(w, 202, map[string]string{"status": "skipped"})
 		return
 	}
@@ -56,11 +56,16 @@ func (a *API) launchTopicArtworkScan(groupID string) string {
 // newly recovered primary-library topic without requiring a browser visit.
 func (a *API) runTopicArtworkReconciler(ctx context.Context) {
 	refresh := func() {
-		var groupID string
-		if a.db.QueryRowContext(ctx, `SELECT c.id::text FROM tgstrm.settings s
-			JOIN tgstrm.chats c ON c.id::text=(s.value #>> '{}') AND c.is_active
-			WHERE s.key='active_chat_id'`).Scan(&groupID) == nil {
-			a.launchTopicArtworkScan(groupID)
+		rows, err := a.db.QueryContext(ctx, `SELECT id::text FROM tgstrm.managed_catalog_chats WHERE is_active AND is_forum ORDER BY id`)
+		if err != nil {
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var groupID string
+			if rows.Scan(&groupID) == nil {
+				a.launchTopicArtworkScan(groupID)
+			}
 		}
 	}
 	refresh()

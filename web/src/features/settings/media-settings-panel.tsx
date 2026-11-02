@@ -1,8 +1,11 @@
-import { Activity, Bell, Check, ChevronDown, CircleCheck, Database, FolderCheck, Globe2, HardDrive, KeyRound, LoaderCircle, Radio, RefreshCw, Save, ShieldCheck, Trash2, TriangleAlert, Users } from "lucide-react";
+import { CollectionSettings } from "../library/collection-settings";
+import { Activity, Bell, Check, ChevronDown, CircleCheck, Database, FolderCheck, Globe2, HardDrive, KeyRound, LoaderCircle, Radio, RefreshCw, Save, ShieldCheck, Trash2, TriangleAlert } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 
 type MediaSettings = {
+  ambient_enabled: boolean; ambient_idle_minutes: number; ambient_window: "day" | "week";
+  include_tmdb_id: boolean;
   public_base_url: string;
   movies_path: string;
   shows_path: string;
@@ -26,6 +29,7 @@ type BackupSettings = { enabled: boolean; frequency: "daily" | "weekly" | "inter
 const defaultBackupSettings: BackupSettings = { enabled: false, frequency: "daily", hour: "03:00", weekday: 1, interval_hours: 24, retention: 7 };
 
 const emptySettings: MediaSettings = {
+  ambient_enabled: false, ambient_idle_minutes: 5, ambient_window: "week", include_tmdb_id: false,
   public_base_url: "",
   movies_path: "",
   shows_path: "",
@@ -46,12 +50,17 @@ const formatCacheBytes = (bytes: number) => {
 export function MediaSettingsPanel() {
   const [settings, setSettings] = useState(emptySettings);
   const [token, setToken] = useState("");
+  const [ambientPreviewError, setAmbientPreviewError] = useState("");
+  useEffect(() => {
+    const failed = (event: Event) => setAmbientPreviewError((event as CustomEvent<string>).detail);
+    window.addEventListener("tgstrm:ambient-preview-failed", failed);
+    return () => window.removeEventListener("tgstrm:ambient-preview-failed", failed);
+  }, []);
   const [state, setState] = useState<"loading" | "ready" | "saving" | "saved" | "error">("loading");
   const [message, setMessage] = useState("");
   const [testingTMDB, setTestingTMDB] = useState(false);
   const [clearingCache, setClearingCache] = useState(false);
   const [groups, setGroups] = useState<TelegramGroup[]>([]);
-  const [primaryGroupID, setPrimaryGroupID] = useState("");
   const [health, setHealth] = useState<SystemHealth | null>(null);
   const [checkingHealth, setCheckingHealth] = useState(false);
   const [healthCheckStep, setHealthCheckStep] = useState(-1);
@@ -127,7 +136,8 @@ export function MediaSettingsPanel() {
         return Promise.all([settingsResponse.json() as Promise<MediaSettings>, groupsResponse.json() as Promise<{ groups: TelegramGroup[] }>, healthResponse.json() as Promise<SystemHealth>, backupsResponse.json() as Promise<{ backups: BackupItem[]; directory: string }>, backupSettingsResponse.json() as Promise<BackupSettings>]);
       })
       .then(([data, groupData, healthData, backupData, backupPolicy]) => {
-        setSettings(data); setGroups(groupData.groups); setHealth(healthData); setBackups(backupData.backups); setBackupDirectory(backupData.directory); setBackupSettings(backupPolicy); setPrimaryGroupID(groupData.groups.find((group) => group.active)?.id || ""); setState("ready");
+        setSettings(data);
+      setGroups(groupData.groups); setHealth(healthData); setBackups(backupData.backups); setBackupDirectory(backupData.directory); setBackupSettings(backupPolicy); setState("ready");
       })
       .catch((error: unknown) => {
         if ((error as { name?: string }).name !== "AbortError") {
@@ -151,14 +161,8 @@ export function MediaSettingsPanel() {
       });
       const data = await response.json() as MediaSettings & { message?: string };
       if (!response.ok) throw new Error(data.message || "No se pudo guardar la configuración.");
-      if (primaryGroupID) {
-        const groupResponse = await fetch("/api/v1/groups/active", {
-          method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ group_id: primaryGroupID }),
-        });
-        if (!groupResponse.ok) throw new Error("No se pudo guardar el grupo principal.");
-        setGroups((current) => current.map((group) => ({ ...group, active: group.id === primaryGroupID })));
-      }
       setSettings(data);
+      window.dispatchEvent(new Event("tgstrm:media-settings-saved"));
       setToken("");
       setState("saved");
       window.setTimeout(() => setState("ready"), 1800);
@@ -295,11 +299,7 @@ export function MediaSettingsPanel() {
           <div className="restore-actions"><button type="button" className="test-connection" onClick={() => { setRestoreTarget(null); setRestoreConfirmation(""); }} disabled={restoring}>Cancelar</button><button type="button" className="restore-submit" onClick={restoreBackup} disabled={restoring || restoreConfirmation !== "RESTAURAR"}>{restoring ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}{restoring ? "Restaurando…" : "Restaurar y detener"}</button></div>
         </section>}
         {restoreResult && <section className="restore-confirmation restored" role="status"><div><span className="restore-warning"><CircleCheck size={19} /></span><div><h3>Restauración completada</h3><p>La copia preventiva es {restoreResult.safety_backup}. Reinicia TgStrm para volver a conectar PostgreSQL, Telegram y los procesos en tiempo real.</p></div></div></section>}
-        <section className="settings-card settings-wide">
-          <span className="settings-icon"><Users size={19} /></span>
-          <div className="settings-copy"><h3>Grupo principal</h3><p>Es el foro que TgStrm vigilará como catálogo central y priorizará durante la sincronización.</p></div>
-          <label><span>Grupo principal del catálogo</span><span className="settings-select-control"><select value={primaryGroupID} onChange={(event) => setPrimaryGroupID(event.target.value)}><option value="">Selecciona un grupo</option>{groups.filter((group) => group.forum).map((group) => <option key={group.id} value={group.id}>{group.title}</option>)}</select><i aria-hidden="true"><ChevronDown size={15} /></i></span><small>Los escaneos automáticos, TMDB y la biblioteca se limitan a este grupo.</small></label>
-        </section>
+        <CollectionSettings groups={groups} />
 
         <section className="settings-card settings-wide notification-settings-card">
           <span className="settings-icon"><Bell size={19} /></span>
@@ -324,13 +324,146 @@ export function MediaSettingsPanel() {
         </section>
 
         <section className="settings-card">
-          <span className="settings-icon"><HardDrive size={19} /></span>
-          <div className="settings-copy"><h3>Estructura de episodios</h3><p>Define cómo se organizan las temporadas y los nombres STRM. La detección usa el archivo y después el pie de Telegram.</p></div>
-          <label><span>Formato de series</span><span className="settings-select-control"><select value={settings.series_naming} onChange={(event) => setSettings({ ...settings, series_naming: event.target.value as MediaSettings["series_naming"] })}>
-            <option value="universal">Universal · Jellyfin, Plex y Kodi</option>
-            <option value="jellyfin_tmdb">Jellyfin · identificador TMDB</option>
-            <option value="compact">Compacto · código y título</option>
-          </select><i aria-hidden="true"><ChevronDown size={15} /></i></span><small>{settings.series_naming === "universal" ? "Arrow (2012) / Season 01 / Arrow (2012) - S01E01 - Pilot.strm" : settings.series_naming === "jellyfin_tmdb" ? "Arrow (2012) [tmdbid-1412] / Season 01 / Arrow S01E01 - Pilot.strm" : "Arrow (2012) / Season 01 / S01E01 - Pilot.strm"}</small></label>
+          <span className="settings-icon">
+            <HardDrive size={19} />
+          </span>
+          <div className="settings-copy">
+            <h3>Estructura de biblioteca</h3>
+            <p>
+              Define los nombres STRM y las temporadas. El perfil Jellyfin
+              también permite varias versiones de una película en su carpeta. El
+              identificador TMDB es opcional.
+            </p>
+          </div>
+          <label>
+            <span>Formato de biblioteca</span>
+            <span className="settings-select-control">
+              <select
+                value={settings.series_naming}
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    series_naming: event.target
+                      .value as MediaSettings["series_naming"],
+                  })
+                }
+              >
+                <option value="universal">
+                  Universal · Jellyfin, Plex y Kodi
+                </option>
+                <option value="jellyfin_tmdb">
+                  Jellyfin · varias versiones
+                </option>
+                <option value="compact">Compacto · código y título</option>
+              </select>
+              <i aria-hidden="true">
+                <ChevronDown size={15} />
+              </i>
+            </span>
+            <small>
+              {settings.series_naming === "universal"
+                ? "Arrow (2012) / Season 01 / Arrow (2012) - S01E01 - Pilot.strm"
+                : settings.series_naming === "jellyfin_tmdb"
+                  ? `Arrow (2012)${settings.include_tmdb_id ? " [tmdbid-1412]" : ""} / Season 01 / Arrow S01E01 - Pilot.strm`
+                  : "Arrow (2012) / Season 01 / S01E01 - Pilot.strm"}
+            </small>
+          </label>
+          {settings.series_naming === "jellyfin_tmdb" && (
+            <>
+              <label className="backup-toggle">
+                <input
+                  type="checkbox"
+                  checked={settings.include_tmdb_id ?? false}
+                  onChange={(event) =>
+                    setSettings({
+                      ...settings,
+                      include_tmdb_id: event.target.checked,
+                    })
+                  }
+                />
+                <span>
+                  <i />
+                  Incluir ID de TMDB en las carpetas
+                </span>
+              </label>
+              <small>
+                Desactivado: título y año. Activado: añade [tmdbid-ID] a
+                películas y series. Los archivos existentes solo cambian al
+                regenerar sus STRM.
+              </small>
+            </>
+          )}
+        </section>
+
+        <section className="settings-card">
+          <span className="settings-icon">
+            <Globe2 size={19} />
+          </span>
+          <div className="settings-copy">
+            <h3>Modo ambiente</h3>
+            <p>
+              Tendencias de TMDB cuando no estés usando la herramienta. No
+              bloquea tu sesión.
+            </p>
+          </div>
+          <button type="button" className="test-connection" disabled={!settings.tmdb_configured} onClick={()=>{setAmbientPreviewError("");window.dispatchEvent(new Event("tgstrm:ambient-preview"));}}>Probar salvapantallas</button>
+          {ambientPreviewError && <small role="status">{ambientPreviewError}</small>}
+<label className="backup-toggle ambient-toggle">
+            <input
+              type="checkbox"
+              checked={settings.ambient_enabled ?? false}
+              onChange={(event) =>
+                setSettings({
+                  ...settings,
+                  ambient_enabled: event.target.checked,
+                })
+              }
+            />
+            <span>
+              <i />
+              Activar salvapantallas
+            </span>
+          </label>
+          <label>
+            <span>Espera de inactividad (minutos)</span>
+            <input
+              type="number"
+              min="1"
+              max="120"
+              value={settings.ambient_idle_minutes || 5}
+              onChange={(event) =>
+                setSettings({
+                  ...settings,
+                  ambient_idle_minutes: Number(event.target.value),
+                })
+              }
+            />
+          </label>
+          <label>
+            <span>Tendencias</span>
+            <span className="settings-select-control">
+              <select
+                value={settings.ambient_window || "week"}
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    ambient_window: event.target.value as "day" | "week",
+                  })
+                }
+              >
+                <option value="day">Del día</option>
+                <option value="week">De la semana</option>
+              </select>
+              <i aria-hidden="true">
+                <ChevronDown size={15} />
+              </i>
+            </span>
+          </label>
+          <small>
+            Requiere TMDB configurado. No se activa durante una reproducción, un
+            formulario o un diálogo. La pantalla completa depende del navegador
+            y se activa desde el salvapantallas.
+          </small>
         </section>
 
         <section className="settings-card">

@@ -49,8 +49,22 @@ func (a *API) activity(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.QueryContext(r.Context(), `
 			SELECT id,kind,status,title,detail,occurred_at,href,children FROM (
 			 SELECT ae.id::text,ae.kind,ae.status,ae.title,ae.detail,ae.occurred_at,
-			   CASE WHEN ae.group_id IS NOT NULL THEN concat('/groups/',ae.group_id) ELSE '/activity' END AS href,'[]'::jsonb AS children
+			   CASE WHEN ae.group_id IS NOT NULL AND ae.topic_id IS NOT NULL THEN concat('/groups/',ae.group_id,'/topics/',ae.topic_id,'/manage') WHEN ae.group_id IS NOT NULL THEN concat('/groups/',ae.group_id) ELSE '/activity' END AS href,'[]'::jsonb AS children
 			 FROM tgstrm.activity_events ae
+
+             UNION ALL
+             SELECT mm.id::text,'movie',
+               CASE WHEN count(d.id) FILTER(WHERE d.status='review' OR (d.status='failed' AND COALESCE(d.last_error,'') NOT LIKE '%FLOOD_WAIT%'))>0 THEN 'error'
+               WHEN count(d.id) FILTER(WHERE d.status NOT IN ('completed','review','excluded'))>0 OR EXISTS(SELECT 1 FROM tgstrm.movie_monitor_scopes s WHERE s.monitor_id=mm.id AND NOT s.initial_scan_complete) THEN 'pending' ELSE 'completed' END,
+               concat(sc.title,' → ',dc.title),
+               concat(count(d.id) FILTER(WHERE d.status='completed'),' películas copiadas con STRM · ',count(d.id) FILTER(WHERE d.status='review'),' por revisar · ',count(d.id) FILTER(WHERE d.status NOT IN ('completed','review','excluded')),' pendientes'),
+               greatest(mm.updated_at,COALESCE(max(d.updated_at),mm.created_at)), '/mirror/manage',
+               COALESCE((SELECT jsonb_agg(jsonb_build_object('id',child.id::text,'status',CASE WHEN child.status IN ('review','failed') THEN 'error' WHEN child.status='completed' THEN 'completed' ELSE 'pending' END,'detail',child.detail,'occurred_at',child.updated_at) ORDER BY (child.status IN ('review','failed')) DESC,child.updated_at DESC)
+               FROM (SELECT delivery.id,delivery.status,delivery.updated_at,concat(COALESCE(media.file_name,'Vídeo de Telegram'),CASE WHEN delivery.last_error IS NULL THEN '' ELSE ' · '||delivery.last_error END) detail
+                 FROM tgstrm.movie_monitor_deliveries delivery JOIN tgstrm.message_media media ON media.message_id=delivery.source_message_id WHERE delivery.monitor_id=mm.id
+                 ORDER BY (delivery.status IN ('review','failed')) DESC,delivery.updated_at DESC LIMIT 250) child),'[]'::jsonb)
+             FROM tgstrm.movie_monitors mm JOIN tgstrm.chats sc ON sc.id=mm.source_chat_id JOIN tgstrm.chats dc ON dc.id=mm.destination_chat_id LEFT JOIN tgstrm.movie_monitor_deliveries d ON d.monitor_id=mm.id
+             GROUP BY mm.id,sc.title,dc.title
 			 UNION ALL
 			 SELECT ci.id::text AS id,'import' AS kind,ci.status,st.title AS title,
 			   concat(ci.completed_count,' de ',ci.requested_count,' archivos',CASE WHEN ci.last_error IS NOT NULL THEN ' · '||ci.last_error ELSE '' END) AS detail,

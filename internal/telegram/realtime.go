@@ -370,7 +370,7 @@ func (s *Service) refreshVideosForTopic(ctx context.Context, refresh videoRefres
 	var groupID, topicID string
 	err := s.DB.QueryRowContext(ctx, `SELECT c.id::text,t.id::text FROM tgstrm.chats c
 	 JOIN tgstrm.topics t ON t.chat_id=c.id AND t.telegram_topic_id=$3 AND t.is_active
-	 JOIN tgstrm.settings st ON st.key='active_chat_id' AND (st.value #>> '{}')=c.id::text
+	 JOIN tgstrm.managed_catalog_chats mc ON mc.id=c.id
 	 WHERE c.account_id=$1 AND c.telegram_peer_type='channel' AND c.telegram_peer_id=$2 AND c.is_active`,
 		accountID, refresh.channelID, refresh.topicTelegramID).Scan(&groupID, &topicID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -404,7 +404,7 @@ func (s *Service) reconcileOneUnresolvedPrimaryTopic(ctx context.Context) error 
 		JOIN tgstrm.messages m ON m.id=sa.message_id AND m.is_active AND m.media_type='video'
 		JOIN tgstrm.topics t ON t.id=m.topic_id AND t.is_active
 		JOIN tgstrm.chats c ON c.id=t.chat_id AND c.is_active
-		JOIN tgstrm.settings st ON st.key='active_chat_id' AND (st.value #>> '{}')=c.id::text
+		JOIN tgstrm.managed_catalog_chats mc ON mc.id=c.id
 		WHERE sa.last_export_error IS NOT NULL
 		  AND (sa.processed_at IS NULL OR sa.processed_at < now()-interval '2 minutes')
 		ORDER BY sa.processed_at NULLS FIRST LIMIT 1`).Scan(&groupID, &topicID)
@@ -691,8 +691,21 @@ func (s *Service) updateDispatcher() tg.UpdateDispatcher {
 			return nil
 		}
 		topicID, ok := topicFromMessage(value)
+		// Plain groups have one local scope. Replies to ordinary messages must
+		// not be mistaken for forum topics. Only explicitly catalogued groups
+		// are considered; unrelated Telegram conversations remain untouched.
+		var wholeGroup bool
+		if err := s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tgstrm.chats c JOIN tgstrm.topics t ON t.chat_id=c.id AND t.telegram_topic_id=0 AND t.is_active WHERE c.account_id=$1 AND c.telegram_peer_id=$2 AND c.telegram_peer_type='channel' AND c.is_active AND NOT c.is_forum)`, accountID, channelID).Scan(&wholeGroup); err != nil {
+			return err
+		}
+		if wholeGroup {
+			topicID, ok = 0, true
+		}
 		if !ok {
 			return nil
+		}
+		if err := s.invalidateManifestMessage(ctx, channelID, topicID, value, edited); err != nil {
+			return err
 		}
 		media, hasMedia := value.GetMedia()
 		isVideo := hasMedia && isVideoMedia(media)
@@ -723,6 +736,9 @@ func (s *Service) updateDispatcher() tg.UpdateDispatcher {
 		return queueMessage(ctx, u.Message, true)
 	})
 	d.OnDeleteChannelMessages(func(ctx context.Context, _ tg.Entities, u *tg.UpdateDeleteChannelMessages) error {
+		if err := s.invalidateDeletedMessageManifests(ctx, u.ChannelID, u.Messages); err != nil {
+			return err
+		}
 		if err := s.removeDeletedTopics(ctx, u.ChannelID, u.Messages); err != nil {
 			return err
 		}
@@ -749,14 +765,17 @@ func (s *Service) updateDispatcher() tg.UpdateDispatcher {
 
 func (s *Service) refreshTopicsForChannel(ctx context.Context, channelID int64) error {
 	var groupID string
-	err := s.DB.QueryRowContext(ctx, `SELECT c.id::text FROM tgstrm.chats c JOIN tgstrm.settings st
-	 ON st.key='active_chat_id' AND (st.value #>> '{}')=c.id::text
-	 WHERE c.account_id=$1 AND c.telegram_peer_type='channel' AND c.telegram_peer_id=$2 AND c.is_forum AND c.is_active`, accountID, channelID).Scan(&groupID)
+	err := s.DB.QueryRowContext(ctx, `SELECT c.id::text FROM tgstrm.chats c
+	 WHERE (EXISTS(SELECT 1 FROM tgstrm.managed_catalog_chats mc WHERE mc.id=c.id) OR EXISTS(SELECT 1 FROM tgstrm.group_replications gr WHERE gr.source_chat_id=c.id AND gr.discover_new_topics AND gr.status IN ('running','completed'))) AND c.account_id=$1 AND c.telegram_peer_type='channel' AND c.telegram_peer_id=$2 AND c.is_forum AND c.is_active`, accountID, channelID).Scan(&groupID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	return s.RefreshTopics(ctx, groupID)
+	if err = s.RefreshTopics(ctx, groupID); err != nil {
+		return err
+	}
+	_, err = s.DB.ExecContext(ctx, `UPDATE tgstrm.group_replications SET last_discovered_at=NULL WHERE source_chat_id::text=$1 AND discover_new_topics AND status IN ('running','completed')`, groupID)
+	return err
 }

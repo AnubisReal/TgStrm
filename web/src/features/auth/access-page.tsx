@@ -37,6 +37,7 @@ export function AccessPage() {
   const [visible, setVisible] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [connectionAttempt, setConnectionAttempt] = useState(0);
 
   function editAPI() {
     setVisible(false);
@@ -60,7 +61,7 @@ export function AccessPage() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [connectionAttempt]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -120,8 +121,20 @@ export function AccessPage() {
       </header>
       <main className="access-main">
         <section className="auth-card" aria-labelledby="login-title">
-          {state.step === "loading" && (
+          {state.step === "loading" && !error && (
             <p role="status">Comprobando tu sesión…</p>
+          )}
+          {state.step === "loading" && error && (
+            <button
+              type="button"
+              className="submit-button"
+              onClick={() => {
+                setError("");
+                setConnectionAttempt((attempt) => attempt + 1);
+              }}
+            >
+              Reintentar conexión
+            </button>
           )}
           {state.step === "database" && (
             <>

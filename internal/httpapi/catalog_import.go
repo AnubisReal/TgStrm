@@ -18,6 +18,7 @@ type catalogImportInput struct {
 	MessageIDs       []string `json:"message_ids"`
 	TMDBID           int64    `json:"tmdb_id,omitempty"`
 	MediaType        string   `json:"media_type,omitempty"`
+	DestinationGroup string   `json:"destination_group_id,omitempty"`
 	DestinationTopic string   `json:"destination_topic_id,omitempty"`
 }
 
@@ -81,7 +82,7 @@ func (a *API) importTopicToCatalog(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		matched = true
-	} else if matched {
+	} else if matched && mediaType == "tv" {
 		// Search considers translated, original and alternative titles. Fetching
 		// the selected identity again with es-ES makes the destination name
 		// independent from the title that happened to produce the match.
@@ -92,6 +93,13 @@ func (a *API) importTopicToCatalog(w http.ResponseWriter, r *http.Request) {
 	destinationTitle := strings.TrimSpace(sourceTitle)
 	if matched && mediaType == "tv" {
 		destinationTitle = catalogTopicTitle(match)
+	}
+
+	destinationTopicID := strings.TrimSpace(input.DestinationTopic)
+	destinationGroupID, err := a.resolveManualImportDestination(r.Context(), groupID, topicID, input.DestinationGroup, destinationTopicID, mediaType, match.ID)
+	if err != nil {
+		fail(w, http.StatusUnprocessableEntity, "invalid_destination", err.Error())
+		return
 	}
 
 	syncCtx, cancelSync := context.WithTimeout(r.Context(), 5*time.Minute)
@@ -125,6 +133,10 @@ func (a *API) importTopicToCatalog(w http.ResponseWriter, r *http.Request) {
 			}
 			foundSelected[messageID] = true
 		}
+		if err := rows.Err(); err != nil {
+			fail(w, http.StatusInternalServerError, "videos_failed", "No se pudo leer la selección completa de vídeos.")
+			return
+		}
 	} else {
 		fail(w, http.StatusInternalServerError, "videos_failed", "No se pudieron preparar los vídeos del topic.")
 		return
@@ -138,23 +150,9 @@ func (a *API) importTopicToCatalog(w http.ResponseWriter, r *http.Request) {
 	if len(selectedIDs) == 0 {
 		selectedIDs = availableIDs
 	}
-	destinationTopicID := strings.TrimSpace(input.DestinationTopic)
-	if destinationTopicID != "" {
-		var destinationGroupID string
-		if err := a.db.QueryRowContext(r.Context(), `SELECT t.chat_id::text FROM tgstrm.topics t
-			JOIN tgstrm.settings s ON s.key='active_chat_id' AND (s.value #>> '{}')=t.chat_id::text
-			WHERE t.id::text=$1 AND t.is_active`, destinationTopicID).Scan(&destinationGroupID); err != nil {
-			fail(w, http.StatusUnprocessableEntity, "invalid_destination", "El destino no pertenece al grupo principal o ya no está disponible.")
-			return
-		}
-		if destinationGroupID == groupID {
-			fail(w, http.StatusUnprocessableEntity, "invalid_destination", "El destino debe estar en el grupo principal.")
-			return
-		}
-	}
-	importID, alreadyQueued, err := a.enqueueCatalogImport(r.Context(), topicID, destinationTopicID, destinationTitle, selectedIDs, match, matched, mediaType)
+	importID, alreadyQueued, err := a.enqueueCatalogImportToGroup(r.Context(), topicID, destinationGroupID, destinationTopicID, destinationTitle, selectedIDs, match, matched, mediaType)
 	if err != nil {
-		fail(w, http.StatusInternalServerError, "import_queue_failed", "No se pudo guardar la importación antes de iniciarla.")
+		fail(w, http.StatusConflict, "import_queue_failed", err.Error())
 		return
 	}
 	requested := availableVideos
@@ -197,6 +195,8 @@ func (a *API) previewCatalogImports(w http.ResponseWriter, r *http.Request) {
 	if input.Prepare {
 		a.startImportPreviewPreparation(r.PathValue("groupID"), input.TopicIDs)
 	}
+	destinations := a.importDestinations(r.Context())
+	destinationGroups := a.importDestinationGroups(r.Context(), r.PathValue("groupID"))
 	items := make([]map[string]any, 0, len(input.TopicIDs))
 	for _, topicID := range input.TopicIDs {
 		var title string
@@ -235,7 +235,7 @@ func (a *API) previewCatalogImports(w http.ResponseWriter, r *http.Request) {
 			JOIN tgstrm.topics t ON t.id::text=$1 JOIN tgstrm.chats c ON c.id=t.chat_id AND c.account_id=ss.account_id
 			WHERE ss.scope='import_preview' AND ss.resource_id::text=$1`, topicID).Scan(&preparationStatus, &preparationError)
 		items = append(items, map[string]any{"topic_id": topicID, "source_title": matchQuery, "topic_title": title, "video_count": videoCount,
-			"suggested_id": suggestedID, "candidates": results, "media_type": mediaType, "destinations": a.importDestinations(r.Context()), "preparation_status": preparationStatus, "preparation_error": preparationError})
+			"suggested_id": suggestedID, "candidates": results, "media_type": mediaType, "destinations": destinations, "destination_groups": destinationGroups, "preparation_status": preparationStatus, "preparation_error": preparationError})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "image_base_url": "https://image.tmdb.org/t/p/w342"})
 }
@@ -325,39 +325,52 @@ func (a *API) runCatalogImport(parent context.Context, importID, leaseToken, gro
 		}
 	}
 	captions := make(map[string]string)
-	rows, err := a.db.QueryContext(ctx, `SELECT m.id::text,COALESCE(mm.file_name,''),COALESCE(m.body,'')
-		FROM tgstrm.messages m JOIN tgstrm.message_media mm ON mm.message_id=m.id
-		WHERE m.topic_id::text=$1 AND m.is_active AND m.media_type='video' ORDER BY m.telegram_message_id`, topicID)
+	sources, err := a.loadCatalogCaptionSources(ctx, topicID, selectedIDs)
 	if err != nil {
+		a.failCatalogImport(importID, topicID, leaseToken, err)
 		return
 	}
-	selected := make(map[string]bool, len(selectedIDs))
-	for _, id := range selectedIDs {
-		selected[id] = true
-	}
-	for rows.Next() {
-		var messageID, fileName, caption string
-		if rows.Scan(&messageID, &fileName, &caption) != nil || (len(selected) > 0 && !selected[messageID]) {
-			continue
-		}
+	// Release the result connection before episode detection makes nested DB
+	// requests or network calls. A small pool must not depend on a free slot
+	// while this import retains one for its entire caption preparation.
+	for _, source := range sources {
+		messageID, fileName, caption := source.messageID, source.fileName, source.caption
 		if mediaType == "movie" && matched {
 			captions[messageID] = captionTitle
-		} else if episode, ok := detectEpisode(fileName, caption); ok {
+		} else if episode, ok := a.detectSeriesEpisode(ctx, match.ID, fileName, caption); ok {
 			episodeTitle := ""
-			if matched {
+			if episode.EndEpisode > episode.Episode {
+				episodeTitle = fmt.Sprintf("Episodios %02d-%02d", episode.Episode, episode.EndEpisode)
+			} else if matched {
 				episodeTitle = a.tmdbEpisodeTitle(ctx, match.ID, episode.Season, episode.Episode)
 			}
-			normalized := fmt.Sprintf("%s S%02dE%02d", captionTitle, episode.Season, episode.Episode)
+			normalized := captionTitle + " " + episode.code()
 			if episodeTitle != "" {
 				normalized += " " + episodeTitle
 			}
 			captions[messageID] = normalized
+		} else if matched && strings.TrimSpace(caption) == "" {
+			// Identify the series without inventing an unrecognized episode.
+			captions[messageID] = captionTitle
 		}
 	}
-	rows.Close()
 	result, err := a.telegram.ImportQueuedTopicPreparedToTopic(ctx, importID, groupID, topicID, destinationTopicID, destinationTitle, selectedIDs, captions,
 		func(prepared telegramauth.ImportResult) error {
-			return a.persistCatalogDestination(ctx, prepared, match, matched, mediaType)
+			if err := a.persistCatalogDestination(ctx, prepared, match, matched, mediaType); err != nil {
+				return err
+			}
+			var replication bool
+			if err := a.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tgstrm.topic_replications WHERE import_id=$1::uuid)`, importID).Scan(&replication); err != nil {
+				return err
+			}
+			// Every matched series uses the same durable presentation step,
+			// including manual imports. SendTopicPresentation is idempotent:
+			// an existing presentation is reused before any videos are copied.
+			// Movie collections retain their separate per-movie workflow.
+			if (replication || mediaType == "tv") && matched && match.PosterPath != "" {
+				return a.telegram.SendTopicPresentation(ctx, prepared.DestinationGroupID, prepared.DestinationTopicID, mediaType, match.ID, match.PosterPath)
+			}
+			return nil
 		})
 	if err != nil {
 		a.failCatalogImport(importID, topicID, leaseToken, err)
@@ -370,6 +383,13 @@ func (a *API) runCatalogImport(parent context.Context, importID, leaseToken, gro
 	if err = a.telegram.SyncTopicVideoCatalog(ctx, result.DestinationGroupID, result.DestinationTopicID); err != nil {
 		_, _ = a.db.ExecContext(ctx, `UPDATE tgstrm.catalog_imports SET last_error=$2,updated_at=now() WHERE id=$1`,
 			result.ImportID, fmt.Sprintf("archivos enviados; indexación pendiente: %.400s", err.Error()))
+		return
+	}
+	var catalogueEnabled bool
+	if err = a.db.QueryRowContext(ctx, `SELECT catalogue_enabled FROM tgstrm.catalog_imports WHERE id::text=$1`, result.ImportID).Scan(&catalogueEnabled); err != nil {
+		return
+	}
+	if !catalogueEnabled {
 		return
 	}
 	if mediaType == "movie" {
@@ -583,18 +603,20 @@ func (a *API) matchExternalMovie(r *http.Request, source string) (tmdbResult, bo
 }
 
 func (a *API) importDestinations(ctx context.Context) []map[string]any {
-	rows, err := a.db.QueryContext(ctx, `SELECT t.id::text,t.title,t.library_kind
-		FROM tgstrm.settings s JOIN tgstrm.topics t ON t.chat_id::text=(s.value #>> '{}')
-		WHERE s.key='active_chat_id' AND t.is_active ORDER BY lower(t.title),t.id`)
+	rows, err := a.db.QueryContext(ctx, `SELECT t.id::text,t.title,t.library_kind,c.id::text,c.title,COALESCE(tm.tmdb_id,0)
+		FROM tgstrm.active_catalog_chats c JOIN tgstrm.topics t ON t.chat_id=c.id
+		LEFT JOIN tgstrm.tmdb_matches tm ON tm.topic_id=t.id AND tm.message_id IS NULL
+		WHERE c.is_active AND c.is_forum AND t.is_active ORDER BY lower(t.title),t.id`)
 	if err != nil {
 		return []map[string]any{}
 	}
 	defer rows.Close()
 	items := make([]map[string]any, 0)
 	for rows.Next() {
-		var id, title, kind string
-		if rows.Scan(&id, &title, &kind) == nil {
-			items = append(items, map[string]any{"id": id, "title": title, "library_kind": kind})
+		var id, title, kind, groupID, groupTitle string
+		var tmdbID int64
+		if rows.Scan(&id, &title, &kind, &groupID, &groupTitle, &tmdbID) == nil {
+			items = append(items, map[string]any{"id": id, "title": title, "library_kind": kind, "group_id": groupID, "group_title": groupTitle, "tmdb_id": tmdbID})
 		}
 	}
 	return items

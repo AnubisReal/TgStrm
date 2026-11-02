@@ -11,24 +11,29 @@ import (
 )
 
 type mediaSettingsPayload struct {
-	PublicBaseURL     string `json:"public_base_url"`
-	MoviesPath        string `json:"movies_path"`
-	ShowsPath         string `json:"shows_path"`
-	SeriesNaming      string `json:"series_naming"`
-	TMDBToken         string `json:"tmdb_token,omitempty"`
-	TMDBConfigured    bool   `json:"tmdb_configured"`
-	TMDBVerified      bool   `json:"tmdb_verified"`
-	CacheLimitMB      int64  `json:"cache_limit_mb"`
-	CacheUsedBytes    int64  `json:"cache_used_bytes"`
-	CacheEntries      int    `json:"cache_entries"`
-	NotificationLevel string `json:"notification_level"`
+	AmbientEnabled     bool   `json:"ambient_enabled"`
+	AmbientIdleMinutes int    `json:"ambient_idle_minutes"`
+	AmbientWindow      string `json:"ambient_window"`
+	PublicBaseURL      string `json:"public_base_url"`
+	MoviesPath         string `json:"movies_path"`
+	ShowsPath          string `json:"shows_path"`
+	SeriesNaming       string `json:"series_naming"`
+	IncludeTMDBID      bool   `json:"include_tmdb_id"`
+	TMDBToken          string `json:"tmdb_token,omitempty"`
+	TMDBConfigured     bool   `json:"tmdb_configured"`
+	TMDBVerified       bool   `json:"tmdb_verified"`
+	CacheLimitMB       int64  `json:"cache_limit_mb"`
+	CacheUsedBytes     int64  `json:"cache_used_bytes"`
+	CacheEntries       int    `json:"cache_entries"`
+	NotificationLevel  string `json:"notification_level"`
 }
 
 func (a *API) mediaSettingsDefaults() mediaSettingsPayload {
 	return mediaSettingsPayload{
-		MoviesPath:        filepath.Join(a.store.Dir(), "library", "movies"),
-		ShowsPath:         filepath.Join(a.store.Dir(), "library", "shows"),
-		SeriesNaming:      "universal",
+		MoviesPath:         filepath.Join(a.store.Dir(), "library", "movies"),
+		ShowsPath:          filepath.Join(a.store.Dir(), "library", "shows"),
+		SeriesNaming:       "universal",
+		AmbientIdleMinutes: 5, AmbientWindow: "week",
 		CacheLimitMB:      512,
 		NotificationLevel: "balanced",
 	}
@@ -77,6 +82,16 @@ func (a *API) mediaSettings(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "invalid_json", "Revisa los datos enviados.")
 		return
 	}
+	if input.AmbientIdleMinutes == 0 {
+		input.AmbientIdleMinutes = 5
+	}
+	if input.AmbientWindow == "" {
+		input.AmbientWindow = "week"
+	}
+	if input.AmbientIdleMinutes < 1 || input.AmbientIdleMinutes > 120 || (input.AmbientWindow != "day" && input.AmbientWindow != "week") {
+		fail(w, 422, "invalid_ambient_settings", "Elige entre 1 y 120 minutos y tendencias del día o semana.")
+		return
+	}
 	input.PublicBaseURL = strings.TrimRight(strings.TrimSpace(input.PublicBaseURL), "/")
 	input.MoviesPath, input.ShowsPath = strings.TrimSpace(input.MoviesPath), strings.TrimSpace(input.ShowsPath)
 	parsed, err := url.Parse(input.PublicBaseURL)
@@ -118,7 +133,7 @@ func (a *API) mediaSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	stored := mediaSettingsPayload{PublicBaseURL: input.PublicBaseURL, MoviesPath: input.MoviesPath, ShowsPath: input.ShowsPath, SeriesNaming: input.SeriesNaming, CacheLimitMB: input.CacheLimitMB, NotificationLevel: input.NotificationLevel}
+	stored := mediaSettingsPayload{AmbientEnabled: input.AmbientEnabled, AmbientIdleMinutes: input.AmbientIdleMinutes, AmbientWindow: input.AmbientWindow, PublicBaseURL: input.PublicBaseURL, MoviesPath: input.MoviesPath, ShowsPath: input.ShowsPath, SeriesNaming: input.SeriesNaming, IncludeTMDBID: input.IncludeTMDBID, CacheLimitMB: input.CacheLimitMB, NotificationLevel: input.NotificationLevel}
 	raw, _ := json.Marshal(stored)
 	if _, err = tx.ExecContext(r.Context(), `INSERT INTO tgstrm.settings(key,value) VALUES('media',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,revision=tgstrm.settings.revision+1,updated_at=now()`, raw); err != nil {
 		fail(w, 500, "settings_failed", "No se pudo guardar la configuración.")

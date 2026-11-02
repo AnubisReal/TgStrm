@@ -9,12 +9,25 @@ import (
 	"log"
 	"strings"
 	"time"
+
+	"github.com/gotd/td/tgerr"
 )
+
+const manualImportRequestMatchesSQL = `SELECT destination_chat_id::text=$2
+		 AND COALESCE(destination_topic_id::text,'')=$3 AND destination_title=$4
+		 AND COALESCE(tmdb_id,0)=$5 AND COALESCE(tmdb_media_type,'')=$6
+		 AND ARRAY(SELECT source_message_id::text FROM tgstrm.catalog_import_messages WHERE import_id=ci.id AND selected_for_run ORDER BY source_message_id::text)
+		 = ARRAY(SELECT DISTINCT x FROM unnest($7::text[]) x ORDER BY x)
+		 FROM tgstrm.catalog_imports ci WHERE id=$1::uuid`
 
 // enqueueCatalogImport commits the canonical import row and its complete
 // source manifest before the API acknowledges the request. PostgreSQL remains
 // the only queue and source of truth.
 func (a *API) enqueueCatalogImport(ctx context.Context, sourceTopicID, destinationTopicID, destinationTitle string, messageIDs []string, match tmdbResult, matched bool, mediaType string) (string, bool, error) {
+	return a.enqueueCatalogImportToGroup(ctx, sourceTopicID, "", destinationTopicID, destinationTitle, messageIDs, match, matched, mediaType)
+}
+
+func (a *API) enqueueCatalogImportToGroup(ctx context.Context, sourceTopicID, destinationGroupID, destinationTopicID, destinationTitle string, messageIDs []string, match tmdbResult, matched bool, mediaType string, replicationTopic ...string) (string, bool, error) {
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", false, err
@@ -23,26 +36,79 @@ func (a *API) enqueueCatalogImport(ctx context.Context, sourceTopicID, destinati
 	if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, sourceTopicID); err != nil {
 		return "", false, err
 	}
-	var existingID, existingStatus string
-	err = tx.QueryRowContext(ctx, `SELECT id::text,status FROM tgstrm.catalog_imports
+	var existingID, existingStatus, existingDestination string
+	err = tx.QueryRowContext(ctx, `SELECT id::text,status,COALESCE(destination_chat_id::text,'') FROM tgstrm.catalog_imports
 		WHERE source_topic_id=$1::bigint AND status IN ('pending','review','running')
-		ORDER BY created_at DESC LIMIT 1`, sourceTopicID).Scan(&existingID, &existingStatus)
-	if err == nil && existingStatus == "running" {
-		return existingID, true, tx.Commit()
-	}
+		ORDER BY created_at DESC LIMIT 1`, sourceTopicID).Scan(&existingID, &existingStatus, &existingDestination)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return "", false, err
 	}
 
+	if destinationGroupID == "" && destinationTopicID != "" {
+		err = tx.QueryRowContext(ctx, `SELECT c.id::text FROM tgstrm.chats c JOIN tgstrm.topics t ON t.chat_id=c.id WHERE t.id::text=$1 AND t.is_active AND c.is_active AND c.account_id=(SELECT c2.account_id FROM tgstrm.topics st JOIN tgstrm.chats c2 ON c2.id=st.chat_id WHERE st.id::text=$2)`, destinationTopicID, sourceTopicID).Scan(&destinationGroupID)
+	} else if destinationGroupID == "" {
+		err = tx.QueryRowContext(ctx, `SELECT id::text FROM tgstrm.active_catalog_chats WHERE is_active AND is_forum AND (SELECT count(*) FROM tgstrm.active_catalog_chats WHERE is_active AND is_forum)=1`).Scan(&destinationGroupID)
+	} else {
+		var available bool
+		err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tgstrm.chats c WHERE c.id::text=$1 AND c.is_active AND c.is_forum
+ AND c.account_id=(SELECT sc.account_id FROM tgstrm.topics st JOIN tgstrm.chats sc ON sc.id=st.chat_id WHERE st.id::text=$2)
+ AND ($3 OR EXISTS(SELECT 1 FROM tgstrm.managed_catalog_chats mc WHERE mc.id=c.id)))`, destinationGroupID, sourceTopicID, len(replicationTopic) == 0).Scan(&available)
+		if err == nil && !available {
+			err = errors.New("el cajón destino no está disponible")
+		}
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("selecciona un destino de biblioteca: %w", err)
+	}
+	if len(replicationTopic) > 0 && existingID != "" {
+		return "", false, errors.New("el origen ya tiene una importación pendiente; revisa ese trabajo antes de crear otra réplica")
+	}
+	if existingDestination != "" && existingDestination != destinationGroupID {
+		return "", false, errors.New("la importación pendiente tiene otro destino; no se redirigirá automáticamente")
+	}
 	var destinationTopic sql.NullString
 	if strings.TrimSpace(destinationTopicID) != "" {
-		destinationTopic = sql.NullString{String: destinationTopicID, Valid: true}
+		err = tx.QueryRowContext(ctx, `SELECT id::text FROM tgstrm.topics WHERE id::text=$1 AND chat_id::text=$2 AND is_active`, destinationTopicID, destinationGroupID).Scan(&destinationTopic)
+		if err != nil {
+			return "", false, err
+		}
 	} else {
-		_ = tx.QueryRowContext(ctx, `SELECT t.id::text FROM tgstrm.settings s
-	JOIN tgstrm.chats c ON c.id::text=(s.value #>> '{}') AND c.is_active
-	JOIN tgstrm.topics t ON t.chat_id=c.id AND t.is_active AND lower(t.title)=lower($1)
-		WHERE s.key='active_chat_id' ORDER BY t.id DESC LIMIT 1`, destinationTitle).Scan(&destinationTopic)
+		lookupErr := tx.QueryRowContext(ctx, `SELECT t.id::text FROM tgstrm.topics t
+ LEFT JOIN tgstrm.tmdb_matches tm ON tm.topic_id=t.id AND tm.message_id IS NULL
+ WHERE t.chat_id::text=$1 AND t.is_active AND (lower(t.title)=lower($2) OR ($3='tv' AND $4>0 AND tm.media_type='tv' AND tm.tmdb_id=$4))
+ ORDER BY (tm.tmdb_id=$4) DESC NULLS LAST,t.id DESC LIMIT 1`, destinationGroupID, destinationTitle, mediaType, match.ID).Scan(&destinationTopic)
+		if lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
+			return "", false, lookupErr
+		}
 	}
+	if destinationTopic.Valid && matched && mediaType == "tv" {
+		var compatible bool
+		err = tx.QueryRowContext(ctx, `SELECT t.library_kind<>'movie_collection'
+		 AND NOT EXISTS(SELECT 1 FROM tgstrm.tmdb_matches tm WHERE tm.topic_id=t.id AND tm.message_id IS NULL AND (tm.media_type<>'tv' OR tm.tmdb_id<>$2))
+		 FROM tgstrm.topics t WHERE t.id::text=$1`, destinationTopic.String, match.ID).Scan(&compatible)
+		if err != nil {
+			return "", false, err
+		}
+		if !compatible {
+			return "", false, errors.New("El topic destino está asociado a otro contenido; revisa la coincidencia antes de enviar.")
+		}
+	}
+	if destinationTopic.Valid && destinationTopic.String == sourceTopicID {
+		return "", false, errors.New("El topic de destino no puede ser el mismo que el origen.")
+	}
+	if existingID != "" && len(replicationTopic) == 0 {
+		var same bool
+		err = tx.QueryRowContext(ctx, manualImportRequestMatchesSQL, existingID, destinationGroupID, destinationTopic.String, destinationTitle, match.ID, mediaType, messageIDs).Scan(&same)
+		if err != nil {
+			return "", false, err
+		}
+		if !same {
+			return "", false, errors.New("Este origen ya tiene un envío pendiente con otra selección o destino. Espera a que termine y revisa el trabajo en Actividad.")
+		}
+		return existingID, true, tx.Commit()
+	}
+	err = nil
+
 	payload := []byte(`null`)
 	queuedMediaType, tmdbID := "", int64(0)
 	if matched {
@@ -79,6 +145,9 @@ func (a *API) enqueueCatalogImport(ctx context.Context, sourceTopicID, destinati
 	if err != nil {
 		return "", false, err
 	}
+	if _, err = tx.ExecContext(ctx, catalogImportDestinationScopeSQL, importID, destinationGroupID, len(replicationTopic) > 0); err != nil {
+		return "", false, err
+	}
 	if _, err = tx.ExecContext(ctx, `UPDATE tgstrm.catalog_import_messages SET selected_for_run=false,updated_at=now()
 		WHERE import_id=$1::uuid`, importID); err != nil {
 		return "", false, err
@@ -88,6 +157,11 @@ func (a *API) enqueueCatalogImport(ctx context.Context, sourceTopicID, destinati
 			VALUES($1::uuid,$2::bigint,'pending',true) ON CONFLICT(import_id,source_message_id)
 			DO UPDATE SET status='pending',
 				selected_for_run=true,last_error=NULL,updated_at=now()`, importID, messageID); err != nil {
+			return "", false, err
+		}
+	}
+	if len(replicationTopic) > 0 {
+		if _, err = tx.ExecContext(ctx, `UPDATE tgstrm.topic_replications SET import_id=$2::uuid,status='queued',initial_upper_message_id=COALESCE(initial_upper_message_id,(SELECT upper_message_id FROM tgstrm.topic_replication_manifests WHERE id=tgstrm.topic_replications.manifest_id)),updated_at=now() WHERE id::text=$1 AND source_topic_id::text=$3`, replicationTopic[0], importID, sourceTopicID); err != nil {
 			return "", false, err
 		}
 	}
@@ -118,19 +192,23 @@ func (a *API) runCatalogImportQueue(ctx context.Context) {
 	}
 }
 
+// Content checks are enforced before claiming, so stale work cannot monopolize FIFO.
+const catalogImportClaimSQL = `WITH next AS (
+		SELECT id FROM tgstrm.catalog_imports
+		WHERE ((status='pending' AND next_attempt_at<=now())
+		   OR (status='running' AND (lease_expires_at IS NULL OR lease_expires_at<=now())))
+ AND NOT EXISTS(SELECT 1 FROM tgstrm.topic_replications tr JOIN tgstrm.group_replications gr ON gr.id=tr.group_replication_id JOIN tgstrm.collection_replication_plans p ON p.id=gr.plan_id LEFT JOIN tgstrm.topic_replication_manifests mf ON mf.id=tr.manifest_id WHERE tr.import_id=tgstrm.catalog_imports.id AND (p.status<>'running' OR mf.id IS NULL OR mf.status<>'eligible' OR mf.invalidated_at IS NOT NULL OR mf.revision IS DISTINCT FROM tr.manifest_revision))
+		ORDER BY queued_at,id FOR UPDATE SKIP LOCKED LIMIT 1
+	) UPDATE tgstrm.catalog_imports ci SET status='running',started_at=now(),attempt_count=attempt_count+1,
+		last_error=NULL,lease_token=gen_random_uuid(),lease_expires_at=now()+interval '2 minutes',updated_at=now()
+	FROM next WHERE ci.id=next.id RETURNING ci.id::text,ci.lease_token::text`
+
 func (a *API) processNextCatalogImport(ctx context.Context) error {
 	if a.telegram == nil || !a.telegram.Connected() {
 		return nil
 	}
 	var importID, leaseToken string
-	err := a.db.QueryRowContext(ctx, `WITH next AS (
-		SELECT id FROM tgstrm.catalog_imports
-		WHERE (status='pending' AND next_attempt_at<=now())
-		   OR (status='running' AND (lease_expires_at IS NULL OR lease_expires_at<=now()))
-		ORDER BY queued_at,id FOR UPDATE SKIP LOCKED LIMIT 1
-	) UPDATE tgstrm.catalog_imports ci SET status='running',started_at=now(),attempt_count=attempt_count+1,
-		last_error=NULL,lease_token=gen_random_uuid(),lease_expires_at=now()+interval '2 minutes',updated_at=now()
-	FROM next WHERE ci.id=next.id RETURNING ci.id::text,ci.lease_token::text`).Scan(&importID, &leaseToken)
+	err := a.db.QueryRowContext(ctx, catalogImportClaimSQL).Scan(&importID, &leaseToken)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -215,6 +293,31 @@ func (a *API) failCatalogImport(importID, topicID, leaseToken string, cause erro
 		return
 	}
 	message := fmt.Sprintf("%.500s", cause.Error())
+	if wait, ok := tgerr.AsFloodWait(cause); ok {
+		result, err := a.db.Exec(`UPDATE tgstrm.catalog_imports SET status='pending',lease_token=NULL,lease_expires_at=NULL,next_attempt_at=now()+($4::double precision*interval '1 second'),last_error=$3,updated_at=now() WHERE id=$1::uuid AND lease_token=$2::uuid`, importID, leaseToken, message, wait.Seconds())
+		if err == nil {
+			if changed, _ := result.RowsAffected(); changed == 1 {
+				a.publishCatalogImportEvent(context.Background(), importID, topicID, "queued")
+			}
+		}
+		return
+	}
+	if rpc, ok := tgerr.As(cause); errors.Is(cause, context.DeadlineExceeded) || (ok && rpc.Code >= 500 && rpc.Code < 600) {
+		// Reuse the same delivery ledger and stable Telegram random IDs.
+		// Slow repeated server failures without losing a partially copied topic.
+		result, err := a.db.Exec(catalogServerRetrySQL, importID, leaseToken, message)
+		if err == nil {
+			if changed, _ := result.RowsAffected(); changed == 1 {
+				a.publishCatalogImportEvent(context.Background(), importID, topicID, "queued")
+			}
+		}
+		return
+	}
+
+	if strings.Contains(message, "la réplica se pausó") {
+		_, _ = a.db.Exec(`UPDATE tgstrm.catalog_imports SET status='pending',lease_token=NULL,lease_expires_at=NULL,next_attempt_at=now()+interval '5 seconds',last_error=$3 WHERE id=$1::uuid AND lease_token=$2::uuid`, importID, leaseToken, message)
+		return
+	}
 	if strings.Contains(strings.ToLower(message), "reconectando") {
 		result, err := a.db.Exec(`UPDATE tgstrm.catalog_imports SET status='pending',lease_token=NULL,lease_expires_at=NULL,next_attempt_at=now()+interval '5 seconds',last_error=$3,updated_at=now() WHERE id=$1::uuid AND lease_token=$2::uuid`, importID, leaseToken, message)
 		if err != nil {
@@ -241,5 +344,10 @@ func (a *API) publishCatalogImportEvent(ctx context.Context, importID, topicID, 
 		return
 	}
 	_, _ = a.db.ExecContext(ctx, `INSERT INTO tgstrm.outbox_events(event_type,aggregate_type,aggregate_id,payload)
-		VALUES('catalog.import.progress','topic',$1::bigint,jsonb_build_object('import_id',$2,'reason',$3))`, topicID, importID, reason)
+		VALUES('catalog.import.progress','topic',$1::bigint,jsonb_build_object('import_id',$2::text,'reason',$3::text))`, topicID, importID, reason)
 }
+
+const catalogServerRetrySQL = `UPDATE tgstrm.catalog_imports SET status='pending',lease_token=NULL,lease_expires_at=NULL,next_attempt_at=now()+(LEAST(300,GREATEST(30,attempt_count*10))*interval '1 second'),last_error=$3,updated_at=now() WHERE id=$1::uuid AND lease_token=$2::uuid`
+
+const catalogImportDestinationScopeSQL = `UPDATE tgstrm.catalog_imports SET destination_chat_id=$2::bigint,
+ catalogue_enabled=($3 OR EXISTS(SELECT 1 FROM tgstrm.active_catalog_chats ac WHERE ac.id=$2::bigint)) WHERE id=$1::uuid`

@@ -85,6 +85,7 @@ type Service struct {
 	subscribers          map[uint64]chan RealtimeEvent
 	nextSubID            uint64
 	connected            atomic.Bool
+	historyReadGate      historyReadGate
 }
 
 type Profile struct {
@@ -514,6 +515,7 @@ func (s *Service) run(ctx context.Context) {
 			}()
 			dialogTicker := time.NewTicker(5 * time.Minute)
 			primaryTopicsTicker := time.NewTicker(10 * time.Second)
+			var nextUnresolvedCheck time.Time
 			outboxTicker := time.NewTicker(300 * time.Millisecond)
 			mirrorTicker := time.NewTicker(15 * time.Second)
 			defer dialogTicker.Stop()
@@ -555,19 +557,27 @@ func (s *Service) run(ctx context.Context) {
 					// MTProto updates remain the fast path. This small authoritative
 					// reconciliation closes gaps caused by a transient disconnect.
 					var primaryGroupID string
-					if s.DB.QueryRowContext(runCtx, `SELECT c.id::text FROM tgstrm.settings st
-						JOIN tgstrm.chats c ON c.id::text=(st.value #>> '{}') AND c.is_active
-						WHERE st.key='active_chat_id'`).Scan(&primaryGroupID) == nil {
+					if s.DB.QueryRowContext(runCtx, `SELECT c.id::text FROM tgstrm.managed_catalog_chats c
+ LEFT JOIN tgstrm.sync_states ss ON ss.account_id=c.account_id AND ss.scope='topics' AND ss.resource_id=c.id
+ WHERE c.is_active AND c.is_forum ORDER BY ss.completed_at NULLS FIRST,c.id LIMIT 1`).Scan(&primaryGroupID) == nil {
 						refreshCtx, cancel := context.WithTimeout(runCtx, 20*time.Second)
 						if err := s.RefreshTopics(refreshCtx, primaryGroupID); err != nil {
 							log.Printf("primary topic reconciliation: %v", err)
 						}
 						cancel()
-						unresolvedCtx, unresolvedCancel := context.WithTimeout(runCtx, 30*time.Second)
-						if err := s.reconcileOneUnresolvedPrimaryTopic(unresolvedCtx); err != nil {
-							log.Printf("unresolved video reconciliation: %v", err)
+						if time.Now().After(nextUnresolvedCheck) {
+							// Caption edits are handled by updates; this is only the
+							// fallback for gaps, not a ten-second retry of unresolved files.
+							nextUnresolvedCheck = time.Now().Add(time.Minute)
+							unresolvedCtx, unresolvedCancel := context.WithTimeout(runCtx, 30*time.Second)
+							if err := s.reconcileOneUnresolvedPrimaryTopic(unresolvedCtx); err != nil {
+								if wait, ok := tgerr.AsFloodWait(err); ok && wait > time.Minute {
+									nextUnresolvedCheck = time.Now().Add(wait)
+								}
+								log.Printf("unresolved video reconciliation: %v", err)
+							}
+							unresolvedCancel()
 						}
-						unresolvedCancel()
 						watchedCtx, watchedCancel := context.WithTimeout(runCtx, 30*time.Second)
 						if err := s.reconcileOneWatchedTopic(watchedCtx); err != nil {
 							log.Printf("watched topic reconciliation: %v", err)

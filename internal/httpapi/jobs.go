@@ -35,7 +35,16 @@ func (a *API) jobs(w http.ResponseWriter, r *http.Request) {
 			FROM tgstrm.catalog_imports ci JOIN tgstrm.topics st ON st.id=ci.source_topic_id AND st.is_active
 			JOIN tgstrm.chats sc ON sc.id=st.chat_id AND sc.is_active
 			LEFT JOIN tgstrm.topics dt ON dt.id=ci.destination_topic_id AND dt.is_active
-			WHERE ci.status IN ('pending','review','running','failed')
+			WHERE ci.status IN ('pending','review','running','failed') AND NOT EXISTS(SELECT 1 FROM tgstrm.topic_replications tr WHERE tr.import_id=ci.id)
+
+            UNION ALL
+            SELECT mm.id::text,'movie',CASE WHEN mm.status='paused' THEN 'pending' WHEN count(d.id) FILTER(WHERE d.status='failed')>0 OR mm.last_error IS NOT NULL THEN 'failed' ELSE 'running' END,
+             concat(sc.title,' → ',dc.title),concat(count(d.id) FILTER(WHERE d.status='completed'),' con STRM · ',count(d.id) FILTER(WHERE d.status='review'),' por revisar · ',count(d.id) FILTER(WHERE d.status NOT IN ('completed','review','excluded')),' pendientes',CASE WHEN mm.last_error IS NULL THEN '' ELSE ' · '||mm.last_error END),
+             greatest(mm.updated_at,COALESCE(max(d.updated_at),mm.updated_at)),'/mirror/manage'
+             FROM tgstrm.movie_monitors mm JOIN tgstrm.chats sc ON sc.id=mm.source_chat_id JOIN tgstrm.chats dc ON dc.id=mm.destination_chat_id
+             LEFT JOIN tgstrm.movie_monitor_deliveries d ON d.monitor_id=mm.id
+             WHERE mm.status<>'paused' GROUP BY mm.id,sc.title,dc.title
+             HAVING count(d.id) FILTER(WHERE d.status NOT IN ('completed','excluded'))>0 OR mm.last_error IS NOT NULL
 			UNION ALL
 			SELECT ml.id::text,'mirror',
 				CASE WHEN ml.history_status='failed' OR count(md.id) FILTER (WHERE md.status='failed' OR md.edit_status='failed')>0 THEN 'failed' WHEN ml.history_status='pending' THEN 'pending' ELSE 'running' END,
@@ -68,6 +77,22 @@ func (a *API) jobs(w http.ResponseWriter, r *http.Request) {
 				ss.updated_at,CASE WHEN c.id IS NULL THEN '/home' ELSE concat('/groups/',c.id,'/manage') END
 			FROM tgstrm.sync_states ss LEFT JOIN tgstrm.chats c ON c.id=ss.resource_id
 			WHERE ss.status='failed' OR (ss.status='running' AND ss.updated_at < now()-interval '5 seconds')
+			UNION ALL
+			SELECT f.id::text,'transfer',CASE WHEN f.status='attention' THEN 'failed' ELSE f.status END,
+            concat('Envío · ',c.title),concat(f.completed_count,' de ',cardinality(f.message_ids),' archivos',CASE WHEN f.last_error IS NULL THEN '' ELSE ' · '||f.last_error END),f.updated_at,concat('/groups/',t.chat_id,'/topics/',t.id,'/manage')
+            FROM tgstrm.file_transfers f JOIN tgstrm.chats c ON c.id=f.destination_chat_id JOIN tgstrm.topics t ON t.id=f.source_topic_id WHERE f.status NOT IN ('completed','cancelled')
+            UNION ALL
+			SELECT p.id::text,'replication',CASE WHEN p.status='attention' THEN 'failed' WHEN p.status IN ('review','paused') THEN 'review' ELSE p.status END,
+			concat('Réplica · ',lc.name),concat(count(tr.id) FILTER(WHERE tr.status='completed'),' de ',count(tr.id) FILTER(WHERE NOT tr.excluded AND tr.status NOT IN ('empty','excluded_nonvideo')),' topics',CASE WHEN p.last_error IS NULL THEN '' ELSE ' · '||p.last_error END),
+			p.updated_at,concat('/imports/replications/',p.id,'/review')
+			FROM tgstrm.collection_replication_plans p JOIN tgstrm.library_collections lc ON lc.id=p.collection_id
+			LEFT JOIN tgstrm.group_replications gr ON gr.plan_id=p.id LEFT JOIN tgstrm.topic_replications tr ON tr.group_replication_id=gr.id
+			WHERE p.status<>'completed' GROUP BY p.id,lc.name
+			UNION ALL
+			SELECT j.id::text,'rename',CASE WHEN j.status='attention' THEN 'failed' ELSE j.status END,concat('Renombrado · ',lc.name),
+			concat(count(ri.group_id) FILTER(WHERE ri.status='completed'),' de ',count(ri.group_id),' cajones'),j.created_at,'/settings'
+			FROM tgstrm.collection_rename_jobs j JOIN tgstrm.library_collections lc ON lc.id=j.collection_id
+			LEFT JOIN tgstrm.collection_rename_items ri ON ri.job_id=j.id WHERE j.status<>'completed' GROUP BY j.id,lc.name
 		) jobs(id,kind,status,title,detail,updated_at,href)
 		ORDER BY CASE WHEN status='failed' THEN 0 ELSE 1 END,updated_at DESC LIMIT 40`)
 	if err != nil {
@@ -91,12 +116,17 @@ func (a *API) jobs(w http.ResponseWriter, r *http.Request) {
 		FROM tgstrm.catalog_imports ci
 		JOIN tgstrm.topics dt ON dt.id=ci.destination_topic_id AND dt.is_active
 		JOIN tgstrm.chats dc ON dc.id=dt.chat_id AND dc.is_active
-		WHERE ci.status='completed'
+		WHERE ci.status='completed' AND NOT EXISTS(SELECT 1 FROM tgstrm.topic_replications tr WHERE tr.import_id=ci.id)
 		UNION ALL
 		SELECT ml.id::text,'mirror','completed',concat(st.title,' → ',dt.title),
 		concat(ml.history_completed,' archivos históricos sincronizados'),ml.updated_at,'/mirror/manage'
 		FROM tgstrm.mirror_links ml JOIN tgstrm.topics st ON st.id=ml.source_topic_id JOIN tgstrm.topics dt ON dt.id=ml.destination_topic_id
 		WHERE ml.history_mode='include_existing' AND ml.history_status='completed'
+		UNION ALL
+        SELECT f.id::text,'transfer','completed',concat('Envío · ',c.title),concat(f.completed_count,' archivos enviados'),f.updated_at,concat('/groups/',t.chat_id,'/topics/',t.id,'/manage')
+        FROM tgstrm.file_transfers f JOIN tgstrm.chats c ON c.id=f.destination_chat_id JOIN tgstrm.topics t ON t.id=f.source_topic_id WHERE f.status='completed'
+        UNION ALL
+		SELECT p.id::text,'replication','completed',concat('Réplica · ',lc.name),'Topics replicados y espejos activados',p.updated_at,concat('/imports/replications/',p.id,'/review') FROM tgstrm.collection_replication_plans p JOIN tgstrm.library_collections lc ON lc.id=p.collection_id WHERE p.status='completed'
 	) recent(id,kind,status,title,detail,updated_at,href) ORDER BY updated_at DESC LIMIT 4`)
 	if err != nil {
 		log.Printf("load recent jobs: %v", err)
@@ -151,6 +181,6 @@ func (a *API) retryJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = a.db.ExecContext(r.Context(), `INSERT INTO tgstrm.outbox_events(event_type,aggregate_type,aggregate_id,payload)
-		VALUES('catalog.import.progress','topic',$1::bigint,jsonb_build_object('import_id',$2,'reason','manual_retry'))`, sourceTopicID, r.PathValue("id"))
+		VALUES('catalog.import.progress','topic',$1::bigint,jsonb_build_object('import_id',$2::text,'reason','manual_retry'))`, sourceTopicID, r.PathValue("id"))
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "pending"})
 }
